@@ -1,0 +1,18 @@
+CITYCARE DIAGNOSTICS
+SYNTHETIC TEST REPORT - NOT A REAL PATIENT
+
+Patient: Demo Patient
+Date: 08 Aug 2026
+
+LABORATORY RESULTS
+
+Test                 Result      Unit       Reference range
+HbA1c                7.2 H       %          4.0-5.6
+Haemoglobin          11.4 L      g/dL       12.0-15.0
+
+WRITTEN PRESCRIPTION
+
+Metformin 500 mg
+After dinner - 30 days
+
+This fixture contains synthetic data and exists only for Vera MVP testing.

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <rect width="1200" height="1600" fill="#fffdf9"/>
+  <rect x="70" y="70" width="1060" height="1460" rx="10" fill="none" stroke="#bbb4a8" stroke-width="3"/>
+  <text x="110" y="150" font-family="Arial, sans-serif" font-size="42" font-weight="700" fill="#23201c">CITYCARE DIAGNOSTICS</text>
+  <text x="110" y="195" font-family="Arial, sans-serif" font-size="24" fill="#6e675d">SYNTHETIC TEST REPORT — NOT A REAL PATIENT</text>
+  <line x1="110" y1="235" x2="1090" y2="235" stroke="#bbb4a8" stroke-width="2"/>
+  <text x="110" y="290" font-family="Arial, sans-serif" font-size="25" fill="#23201c">Patient: Demo Patient</text>
+  <text x="760" y="290" font-family="Arial, sans-serif" font-size="25" fill="#23201c">Date: 08 Aug 2026</text>
+  <text x="110" y="375" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#23201c">LABORATORY RESULTS</text>
+  <rect x="110" y="420" width="980" height="70" fill="#f6f2ea"/>
+  <text x="135" y="465" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#23201c">Test</text>
+  <text x="480" y="465" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#23201c">Result</text>
+  <text x="650" y="465" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#23201c">Unit</text>
+  <text x="800" y="465" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#23201c">Reference range</text>
+  <line x1="110" y1="490" x2="1090" y2="490" stroke="#bbb4a8" stroke-width="2"/>
+  <text x="135" y="550" font-family="Arial, sans-serif" font-size="27" fill="#23201c">HbA1c</text>
+  <text x="480" y="550" font-family="Arial, sans-serif" font-size="27" fill="#23201c">7.2 H</text>
+  <text x="650" y="550" font-family="Arial, sans-serif" font-size="27" fill="#23201c">%</text>
+  <text x="800" y="550" font-family="Arial, sans-serif" font-size="27" fill="#23201c">4.0–5.6</text>
+  <line x1="110" y1="585" x2="1090" y2="585" stroke="#ddd6ca" stroke-width="2"/>
+  <text x="135" y="645" font-family="Arial, sans-serif" font-size="27" fill="#23201c">Haemoglobin</text>
+  <text x="480" y="645" font-family="Arial, sans-serif" font-size="27" fill="#23201c">11.4 L</text>
+  <text x="650" y="645" font-family="Arial, sans-serif" font-size="27" fill="#23201c">g/dL</text>
+  <text x="800" y="645" font-family="Arial, sans-serif" font-size="27" fill="#23201c">12.0–15.0</text>
+  <line x1="110" y1="715" x2="1090" y2="715" stroke="#bbb4a8" stroke-width="2"/>
+  <text x="110" y="805" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#23201c">WRITTEN PRESCRIPTION</text>
+  <rect x="110" y="850" width="980" height="145" rx="12" fill="#faf0dc" stroke="#d6b36d" stroke-width="2"/>
+  <text x="145" y="910" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#23201c">Metformin 500 mg</text>
+  <text x="145" y="958" font-family="Arial, sans-serif" font-size="26" fill="#23201c">After dinner · 30 days</text>
+  <text x="110" y="1090" font-family="Arial, sans-serif" font-size="22" fill="#6e675d">This fixture contains synthetic data and exists only for automated MVP testing.</text>
+  <text x="110" y="1450" font-family="Arial, sans-serif" font-size="20" fill="#8a8175">Generated for Vera buildathon smoke test</text>
+</svg>
