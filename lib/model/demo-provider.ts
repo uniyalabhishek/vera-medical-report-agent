@@ -194,6 +194,7 @@ export class DemoMedicalReportProvider implements MedicalReportProvider {
   async answer(input: QuestionInput): Promise<QuestionResponse> {
     const normalized = input.question.toLowerCase();
     const current = findObservation(input.facts, "fact_hba1c_current");
+    const haemoglobin = findObservation(input.facts, "fact_haemoglobin");
     const medicine = findMedication(input.facts, "fact_metformin");
 
     if (/stop|change|increase|decrease|should i take|missed dose/.test(normalized)) {
@@ -202,6 +203,17 @@ export class DemoMedicalReportProvider implements MedicalReportProvider {
         answer: `The prescription says ${medicine.medicine} ${medicine.dose}, ${medicine.frequency}, for ${medicine.duration}. I cannot tell you to change or stop it.`,
         citations: [citation(medicine)],
         doctorQuestion: "Should I continue this medicine exactly as written until my next review?",
+      };
+    }
+
+    if (/ha?emoglobin|hb\b/.test(normalized)) {
+      return {
+        answerType: /cause|caused|affected|why/.test(normalized)
+          ? "cannot_determine"
+          : "document_fact",
+        answer: `The report records haemoglobin as ${haemoglobin.value} ${haemoglobin.unit}, below its printed range of ${haemoglobin.referenceRange} ${haemoglobin.unit}. The report does not state why it is low.`,
+        citations: [citation(haemoglobin)],
+        doctorQuestion: "What could be causing the low haemoglobin shown in this report?",
       };
     }
 
@@ -232,4 +244,3 @@ export class DemoMedicalReportProvider implements MedicalReportProvider {
 }
 
 export const demoProvider = new DemoMedicalReportProvider();
-

@@ -12,15 +12,23 @@ const CreateCaseSchema = z.object({
   mode: z.enum(["demo", "uploaded"]),
 });
 
+// Anonymous sessions cannot reopen old case IDs after a refresh. Keep a
+// generous abuse guard so repeated buildathon demos do not block the user;
+// normal retention cleanup still removes temporary cases after 24 hours.
+const MAX_ACTIVE_CASES_PER_SESSION = 25;
+
 export async function POST(request: NextRequest) {
   try {
     const session = await requireMutationSession(request);
     const input = CreateCaseSchema.parse(await request.json());
-    if (await countActiveCases(session.tokenHash) >= 5) {
+    if (
+      (await countActiveCases(session.tokenHash)) >=
+      MAX_ACTIVE_CASES_PER_SESSION
+    ) {
       throw new ApiError(
         429,
         "CASE_LIMIT_REACHED",
-        "Delete an earlier case before starting another one.",
+        "This temporary session has reached its case limit. Reload in a fresh browser session.",
       );
     }
     const caseView = await createCase(

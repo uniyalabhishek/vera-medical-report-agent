@@ -66,4 +66,22 @@ describe("DemoMedicalReportProvider", () => {
     expect(answer.answer).toContain("cannot tell you to change or stop");
     expect(answer.citations).toHaveLength(1);
   });
+
+  it("answers a haemoglobin question from the haemoglobin fact", async () => {
+    const extracted = await demoProvider.extract({ caseId: "case", intake, mode: "demo", documents: [] });
+    const facts = extracted.map((fact) => ({ ...fact, confirmed: true }));
+    const analysis = await demoProvider.synthesize({ caseId: "case", intake, facts });
+    const answer = await demoProvider.answer({
+      caseId: "case",
+      intake,
+      facts,
+      analysis,
+      question: "Why is my haemoglobin low?",
+    });
+
+    expect(answer.answerType).toBe("cannot_determine");
+    expect(answer.answer).toContain("11.4 g/dL");
+    expect(answer.answer).not.toContain("HbA1c");
+    expect(answer.citations).toHaveLength(1);
+  });
 });

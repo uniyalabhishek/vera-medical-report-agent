@@ -19,6 +19,7 @@ import type {
   ObservationFact,
   QuestionResponse,
 } from "@/lib/contracts";
+import { cleanCitationLabel, cleanDisplayText } from "@/lib/display-text";
 import { SourceDocument } from "@/components/source-document";
 
 type ExplanationStepProps = {
@@ -97,6 +98,15 @@ function CitationButton({
       <FileText aria-hidden="true" /> {label} <ExternalLink aria-hidden="true" />
     </button>
   );
+}
+
+function visibleCitations(citations: Analysis["cards"][number]["citations"]) {
+  const byLabel = new Map<string, (typeof citations)[number]>();
+  for (const citation of citations) {
+    const label = cleanCitationLabel(citation.label);
+    if (!byLabel.has(label)) byLabel.set(label, { ...citation, label });
+  }
+  return Array.from(byLabel.values());
 }
 
 export function ExplanationStep({
@@ -229,7 +239,7 @@ export function ExplanationStep({
               <span className="summary-overview__discuss">{discussCount} to discuss</span>
             </div>
             <ol>
-              {analysis.cards.map((card) => <li key={card.id}>{card.body}</li>)}
+              {analysis.cards.map((card) => <li key={card.id}>{cleanDisplayText(card.body)}</li>)}
             </ol>
           </section>
         </>
@@ -250,13 +260,13 @@ export function ExplanationStep({
           <section className="explanation-flow" aria-label="Details from your reports">
           {analysis.cards.filter((card) => ["findings", "changes", "instructions"].includes(card.id)).map((card) => (
             <section className={`explanation-section explanation-section--${card.id}`} key={card.id}>
-              <h2>{card.title}</h2>
+              <h2>{cleanDisplayText(card.title)}</h2>
 
               {card.id === "documents" ? (
                 <div className="document-citations">
-                  <p>{card.body}</p>
+                  <p>{cleanDisplayText(card.body)}</p>
                   <div className="citation-list">
-                    {card.citations.map((citation) => (
+                    {visibleCitations(card.citations).map((citation) => (
                       <CitationButton
                         key={citation.sourceSpanId}
                         label={citation.label}
@@ -269,7 +279,7 @@ export function ExplanationStep({
 
               {card.id === "findings" ? (
                 <>
-                  <p>{card.body}</p>
+                  <p>{cleanDisplayText(card.body)}</p>
                   {visualObservation ? (
                     <div className="finding-callout">
                       <span aria-hidden="true">
@@ -309,7 +319,7 @@ export function ExplanationStep({
                     </div>
                   ) : null}
                   <div className="citation-list">
-                    {card.citations.map((citation) => (
+                    {visibleCitations(card.citations).map((citation) => (
                       <CitationButton key={citation.sourceSpanId} label={citation.label} onClick={() => openSource(citation.sourceSpanId)} />
                     ))}
                   </div>
@@ -318,7 +328,7 @@ export function ExplanationStep({
 
               {card.id === "changes" ? (
                 <>
-                  <p>{card.body}</p>
+                  <p>{cleanDisplayText(card.body)}</p>
                   {comparison ? (
                     <div
                       className="timeline"
@@ -339,7 +349,7 @@ export function ExplanationStep({
                     </div>
                   ) : null}
                   <div className="citation-list">
-                    {card.citations.map((citation) => (
+                    {visibleCitations(card.citations).map((citation) => (
                       <CitationButton key={citation.sourceSpanId} label={citation.label} onClick={() => openSource(citation.sourceSpanId)} />
                     ))}
                   </div>
@@ -353,12 +363,12 @@ export function ExplanationStep({
                       <FileText aria-hidden="true" />
                       <span>{medicine.medicine} {medicine.dose} · {medicine.frequency} · {medicine.duration}</span>
                     </div>
-                  )) : <p>{card.body}</p>}
+                  )) : <p>{cleanDisplayText(card.body)}</p>}
                   {medications.length > 0 ? (
                     <p className="restatement-note">This repeats the uploaded prescription. It is not new medical advice.</p>
                   ) : null}
                   <div className="citation-list">
-                    {card.citations.map((citation) => (
+                    {visibleCitations(card.citations).map((citation) => (
                       <CitationButton key={citation.sourceSpanId} label={citation.label} onClick={() => openSource(citation.sourceSpanId)} />
                     ))}
                   </div>
@@ -367,7 +377,7 @@ export function ExplanationStep({
 
               {card.id === "questions" ? (
                 <ul className="question-list">
-                  {analysis.suggestedQuestions.map((suggested) => <li key={suggested}>{suggested}</li>)}
+                  {analysis.suggestedQuestions.map((suggested) => <li key={suggested}>{cleanDisplayText(suggested)}</li>)}
                 </ul>
               ) : null}
             </section>
@@ -403,19 +413,19 @@ export function ExplanationStep({
           <div className="qa-example">
             <span className="qa-example__label">Example question</span>
             <button onClick={() => setQuestion(analysis.suggestedQuestions[0] ?? "")} type="button">
-              {analysis.suggestedQuestions[0]}
+              {cleanDisplayText(analysis.suggestedQuestions[0] ?? "")}
             </button>
           </div>
 
           {answer ? (
             <div className="answer-panel" aria-live="polite">
               <span className="answer-panel__label">Answer from these documents</span>
-              <p>{answer.answer}</p>
+              <p>{cleanDisplayText(answer.answer)}</p>
               {answer.doctorQuestion ? (
-                <p className="doctor-question"><strong>Question for your doctor:</strong> {answer.doctorQuestion}</p>
+                <p className="doctor-question"><strong>Question for your doctor:</strong> {cleanDisplayText(answer.doctorQuestion)}</p>
               ) : null}
               <div className="citation-list">
-                {answer.citations.map((citation) => (
+                {visibleCitations(answer.citations).map((citation) => (
                   <CitationButton key={citation.sourceSpanId} label={citation.label} onClick={() => openSource(citation.sourceSpanId)} />
                 ))}
               </div>

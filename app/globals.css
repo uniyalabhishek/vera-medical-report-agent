@@ -260,6 +260,11 @@ p {
   padding-bottom: 28px;
 }
 
+.page-content--explanation {
+  margin-inline: auto;
+  max-width: 900px;
+}
+
 .page-content--about,
 .page-content--documents {
   background: var(--paper);
@@ -1410,6 +1415,12 @@ p {
   gap: 14px;
   margin-bottom: 4px;
   padding-bottom: 18px;
+}
+
+.explanation-layout--questions .qa-rail--screen,
+.page-content--explanation:has(.explanation-layout--questions) .question-screen-heading {
+  margin-inline: auto;
+  width: min(100%, 720px);
 }
 
 .question-screen-heading .icon-button {

@@ -11,6 +11,7 @@ import type {
   QuestionResponse,
   SourceSpan,
 } from "@/lib/contracts";
+import { cleanDisplayText } from "@/lib/display-text";
 import type {
   ExtractionInput,
   MedicalReportProvider,
@@ -467,7 +468,10 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
           "The cards must be in this order: documents, findings, changes, instructions, questions.",
           "For changes, compare only the same named observation when two dated facts exist; otherwise state that the documents do not show a trend.",
           "For every document-based statement, include the relevant source span IDs. Do not invent source IDs.",
-          "Keep each card concise, neutral, and easy to understand. Avoid alarming language.",
+          "Put source span IDs only in sourceSpanIds. Never include them in a title, body, or suggested question.",
+          "Do not use Markdown, bullets, or internal identifiers in titles or bodies.",
+          "Keep each card to at most 55 words. Use one or two short sentences, neutral language, and only the most decision-relevant values.",
+          "Write for a reader with low medical and digital literacy. Prefer common words and avoid dense lists.",
         ].join(" "),
         input: JSON.stringify({
           userContext: {
@@ -494,11 +498,11 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
         generatedAt: new Date().toISOString(),
         cards: draft.cards.map((card) => ({
           id: card.id,
-          title: card.title,
-          body: card.body,
+          title: cleanDisplayText(card.title),
+          body: cleanDisplayText(card.body),
           citations: card.sourceSpanIds.map((id) => sourceCitation(factBySource.get(id)!)),
         })),
-        suggestedQuestions: draft.suggestedQuestions,
+        suggestedQuestions: draft.suggestedQuestions.map(cleanDisplayText),
       };
     } catch (error) {
       safeProviderError(error, "synthesis");
@@ -533,6 +537,7 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
           "Do not diagnose, infer causes, recommend treatment, or advise medicine changes.",
           "If the documents do not answer the question, say so and suggest one concise question for the doctor.",
           "Cite only supplied source span IDs. A document_fact or approved_explanation answer must have a citation.",
+          "Put source span IDs only in sourceSpanIds. Never include them in answer or doctorQuestion.",
         ].join(" "),
         input: JSON.stringify({
           confirmedFacts: input.facts,
@@ -557,9 +562,9 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
 
       return {
         answerType: draft.answerType,
-        answer: draft.answer,
+        answer: cleanDisplayText(draft.answer),
         citations: draft.sourceSpanIds.map((id) => sourceCitation(factBySource.get(id)!)),
-        ...(draft.doctorQuestion ? { doctorQuestion: draft.doctorQuestion } : {}),
+        ...(draft.doctorQuestion ? { doctorQuestion: cleanDisplayText(draft.doctorQuestion) } : {}),
       };
     } catch (error) {
       safeProviderError(error, "question answering");
