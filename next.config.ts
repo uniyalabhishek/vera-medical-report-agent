@@ -7,7 +7,7 @@ const contentSecurityPolicy = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  `connect-src 'self' https://blob.vercel-storage.com https://*.blob.vercel-storage.com${isProduction ? "" : " ws: wss:"}`,
+  `connect-src 'self' https://vercel.com https://blob.vercel-storage.com https://*.blob.vercel-storage.com${isProduction ? "" : " ws: wss:"}`,
   "media-src 'self' blob:",
   "worker-src 'self' blob:",
   "object-src 'none'",

@@ -25,7 +25,7 @@ type SessionRow = {
 
 export type AuthSession = {
   tokenHash: string;
-  csrfHash: string;
+  csrfToken: string;
   expiresAt: number;
 };
 
@@ -35,6 +35,10 @@ function hash(value: string) {
 
 function randomToken() {
   return randomBytes(32).toString("base64url");
+}
+
+function csrfTokenForSession(token: string) {
+  return hash(`vera-csrf-v1:${token}`);
 }
 
 function safeEqual(left: string, right: string) {
@@ -92,7 +96,7 @@ async function purgeExpiredData(now: number) {
 export async function createSession() {
   const now = Date.now();
   const token = randomToken();
-  const csrfToken = randomToken();
+  const csrfToken = csrfTokenForSession(token);
   const tokenHash = hash(token);
   const expiresAt = now + SESSION_ABSOLUTE_MS;
 
@@ -181,7 +185,7 @@ export async function getSession(request: NextRequest): Promise<AuthSession | nu
 
   return {
     tokenHash,
-    csrfHash: row.csrf_hash,
+    csrfToken: csrfTokenForSession(token),
     expiresAt: row.expires_at,
   };
 }
@@ -192,23 +196,6 @@ export async function requireSession(request: NextRequest) {
     throw new ApiError(401, "SESSION_REQUIRED", "Your secure session expired. Please start again.");
   }
   return session;
-}
-
-export async function rotateCsrf(session: AuthSession) {
-  const csrfToken = randomToken();
-  const csrfHash = hash(csrfToken);
-  if (getStorageMode() === "cloud") {
-    await getCloudSql().query(
-      "UPDATE auth_sessions SET csrf_hash = $1 WHERE token_hash = $2",
-      [csrfHash, session.tokenHash],
-    );
-  } else {
-    db.prepare("UPDATE auth_sessions SET csrf_hash = ? WHERE token_hash = ?").run(
-      csrfHash,
-      session.tokenHash,
-    );
-  }
-  return csrfToken;
 }
 
 function assertSameOrigin(request: NextRequest) {
@@ -223,7 +210,7 @@ export async function requireMutationSession(request: NextRequest) {
   const session = await requireSession(request);
   const csrfToken = request.headers.get("x-csrf-token");
 
-  if (!csrfToken || !safeEqual(hash(csrfToken), session.csrfHash)) {
+  if (!csrfToken || !safeEqual(csrfToken, session.csrfToken)) {
     throw new ApiError(403, "CSRF_REJECTED", "The secure form token is missing or expired.");
   }
 

@@ -4,7 +4,6 @@ import { getProviderCapabilities } from "@/lib/model/gateway";
 import {
   createSession,
   getSession,
-  rotateCsrf,
   setSessionCookie,
 } from "@/lib/server/session";
 
@@ -17,14 +16,13 @@ export async function GET(request: NextRequest) {
     const created = existing ? null : await createSession();
     const session = existing ?? {
       tokenHash: created!.tokenHash,
-      csrfHash: "",
+      csrfToken: created!.csrfToken,
       expiresAt: created!.expiresAt,
     };
-    const csrfToken = existing ? await rotateCsrf(existing) : created!.csrfToken;
     const capabilities = getProviderCapabilities();
 
     const response = privateJson({
-      csrfToken,
+      csrfToken: session.csrfToken,
       expiresAt: new Date(session.expiresAt).toISOString(),
       dataMode: capabilities.liveAnalysis ? "live_enabled" as const : "synthetic_only" as const,
       storageMode: process.env.DATABASE_URL && process.env.BLOB_READ_WRITE_TOKEN
