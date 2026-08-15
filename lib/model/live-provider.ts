@@ -26,7 +26,7 @@ import {
 } from "@/lib/model/provider";
 import { classifyMedicalValue, parseMedicalRange } from "@/lib/medical-range";
 import {
-  extractStandaloneNumericClaims,
+  findUngroundedNumericClaims,
   normalizeOptionalExtractedText,
   sourceContainsLiteral,
   sourceFieldsShareWindow,
@@ -557,6 +557,7 @@ async function verifyAnalysis(
 function validateAnswerDraft(
   draft: z.infer<typeof ModelQuestionResponseSchema>,
   facts: Fact[],
+  intake: QuestionInput["intake"],
 ) {
   const wordCount = draft.answer.trim().split(/\s+/u).filter(Boolean).length;
   const sentenceCount = draft.answer
@@ -580,8 +581,12 @@ function validateAnswerDraft(
     ? [fact.name, fact.value, fact.unit, fact.referenceRange, fact.effectiveDate].join(" ")
     : [fact.medicine, fact.dose, fact.frequency, fact.duration].join(" ")
   ).join("\n");
-  const numericClaims = extractStandaloneNumericClaims(draft.answer);
-  if (numericClaims.some((claim) => !sourceContainsLiteral(citedText, claim))) {
+  const userContextText = [
+    `Age ${intake.age}`,
+    intake.symptoms,
+    intake.medicalHistory,
+  ].join("\n");
+  if (findUngroundedNumericClaims(draft.answer, [citedText, userContextText]).length > 0) {
     throw new ProviderProcessingError("The answer contained a value not found in its source.");
   }
 }
@@ -820,7 +825,7 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
       ) {
         throw new ProviderProcessingError("The answer was not linked to a source.");
       }
-      validateAnswerDraft(draft, input.facts);
+      validateAnswerDraft(draft, input.facts, input.intake);
       await verifyAnswer(openai, input.caseId, input.facts, input.question, draft, input.intake);
 
       return {

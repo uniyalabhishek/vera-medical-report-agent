@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   extractStandaloneNumericClaims,
+  findUngroundedNumericClaims,
   normalizeOptionalExtractedText,
   sourceContainsLiteral,
   sourceFieldsShareWindow,
@@ -44,6 +45,22 @@ describe("extractStandaloneNumericClaims", () => {
   it("keeps complete values while ignoring digits inside medical names", () => {
     expect(extractStandaloneNumericClaims("HbA1c is 7.2% on 2026-08-08; range 4.0–5.6."))
       .toEqual(["7.2", "2026-08-08", "4.0–5.6"]);
+  });
+});
+
+describe("findUngroundedNumericClaims", () => {
+  it("accepts values from either report facts or explicit user context", () => {
+    expect(findUngroundedNumericClaims(
+      "At age 24, your HbA1c result is 9.4%.",
+      ["HbA1c 9.4 %", "Age 24"],
+    )).toEqual([]);
+  });
+
+  it("rejects a new value that appears in neither approved source", () => {
+    expect(findUngroundedNumericClaims(
+      "At age 25, your HbA1c result is 9.4%.",
+      ["HbA1c 9.4 %", "Age 24"],
+    )).toEqual(["25"]);
   });
 });
 

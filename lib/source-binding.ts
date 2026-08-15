@@ -135,3 +135,10 @@ export function extractStandaloneNumericClaims(value: string) {
     /(?<![\p{L}\p{N}])(?:\d{4}-\d{2}-\d{2}|[<>≤≥]?\s*[+-]?\d+(?:\.\d+)?(?:\s*[\u2010-\u2014-]\s*[+-]?\d+(?:\.\d+)?)?)(?![\p{L}\p{N}])/gu,
   )?.map((claim) => claim.trim()) ?? [];
 }
+
+/** Returns numeric claims that do not occur in any approved source text. */
+export function findUngroundedNumericClaims(value: string, approvedSources: string[]) {
+  return extractStandaloneNumericClaims(value).filter((claim) =>
+    !approvedSources.some((source) => sourceContainsLiteral(source, claim))
+  );
+}
