@@ -27,7 +27,7 @@ describe("mobile-first intake flow", () => {
     expect(screen.getByRole("button", { name: /continue to documents/i })).toBeEnabled();
   });
 
-  it("requires the synthetic-data confirmation before review", () => {
+  it("requires the synthetic-data confirmation before analysis", () => {
     render(
       <DocumentsStep
         busy={false}
@@ -45,7 +45,7 @@ describe("mobile-first intake flow", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /continue to review/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /explain my reports/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /choose files/i })).toBeDisabled();
     expect(screen.getByText(/2 blood reports \+ 1 prescription/i)).toBeInTheDocument();
   });

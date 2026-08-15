@@ -344,7 +344,7 @@ export function ExplanationStep({
 
         <aside className="qa-rail" aria-labelledby="qa-heading">
           <h2 id="qa-heading">Ask about these documents</h2>
-          <p>Questions are answered using your confirmed reports.</p>
+          <p>Questions are answered using details checked from your reports.</p>
           <form className="qa-form" onSubmit={submitQuestion}>
             <label className="sr-only" htmlFor="report-question">Ask a question about your reports</label>
             <input
@@ -391,7 +391,7 @@ export function ExplanationStep({
 
           <div className="qa-rail__grounding">
             <ShieldCheck aria-hidden="true" />
-            <span>Answers use only confirmed facts from this case.</span>
+            <span>Answers use only details checked from these reports.</span>
           </div>
         </aside>
       </div>

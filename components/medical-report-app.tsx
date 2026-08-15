@@ -8,9 +8,8 @@ import { AppHeader } from "@/components/app-header";
 import { ExplanationStep } from "@/components/explanation-step";
 import { AboutStep, DocumentsStep, type IntakeDraft } from "@/components/intake-upload-step";
 import { ProgressStepper } from "@/components/progress-stepper";
-import { ReviewStep } from "@/components/review-step";
 
-type AppStep = "about" | "documents" | "review" | "explanation";
+type AppStep = "about" | "documents" | "explanation";
 
 const initialDraft: IntakeDraft = {
   preferredName: "",
@@ -60,7 +59,7 @@ export function MedicalReportApp() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const beginReview = async () => {
+  const analyzeReports = async () => {
     setBusy(true);
     setError(null);
     let createdCaseId: string | null = null;
@@ -76,46 +75,20 @@ export function MedicalReportApp() {
       }
 
       const extracted = await medicalReportApi.extract(created.id, mode);
-      setCaseView(extracted);
-      setFacts(extracted.facts);
-      setStep("review");
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    } catch (caught) {
-      if (createdCaseId) {
-        await medicalReportApi.deleteCase(createdCaseId).catch(() => undefined);
-      }
-      setError(caught instanceof Error ? caught.message : "The case could not be prepared.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const confirmFacts = async () => {
-    if (!caseView) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const ready = await medicalReportApi.confirm(caseView.id, facts);
+      const acceptedFacts = extracted.facts.map((fact) => ({ ...fact, confirmed: true }));
+      const ready = await medicalReportApi.confirm(extracted.id, acceptedFacts);
       setCaseView(ready);
       setFacts(ready.facts);
       setStep("explanation");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "The confirmed facts could not be checked.");
+      if (createdCaseId) {
+        await medicalReportApi.deleteCase(createdCaseId).catch(() => undefined);
+      }
+      setError(caught instanceof Error ? caught.message : "The reports could not be analysed.");
     } finally {
       setBusy(false);
     }
-  };
-
-  const backToDocuments = async () => {
-    setBusy(true);
-    if (caseView) await medicalReportApi.deleteCase(caseView.id).catch(() => undefined);
-    setCaseView(null);
-    setFacts([]);
-    setStep("documents");
-    setError(null);
-    setBusy(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const askQuestion = async (question: string): Promise<QuestionResponse> => {
@@ -138,7 +111,7 @@ export function MedicalReportApp() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const activeStep = step === "about" ? 1 : step === "documents" ? 2 : step === "review" ? 3 : 4;
+  const activeStep = step === "about" ? 1 : step === "documents" ? 2 : 3;
 
   return (
     <div className="app-shell">
@@ -172,7 +145,7 @@ export function MedicalReportApp() {
               window.scrollTo({ top: 0, behavior: "smooth" });
             }}
             onConsentChange={setConsented}
-            onContinue={() => void beginReview()}
+            onContinue={() => void analyzeReports()}
             onFilesChange={(nextFiles) => {
               setFiles(nextFiles);
               setUseSample(nextFiles.length === 0);
@@ -183,17 +156,6 @@ export function MedicalReportApp() {
               setError(null);
             }}
             useSample={useSample}
-          />
-        ) : null}
-
-        {step === "review" ? (
-          <ReviewStep
-            busy={busy}
-            error={error}
-            facts={facts}
-            onBack={() => void backToDocuments()}
-            onConfirm={() => void confirmFacts()}
-            onFactsChange={setFacts}
           />
         ) : null}
 

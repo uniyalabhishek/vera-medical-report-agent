@@ -246,8 +246,8 @@ export function DocumentsStep({
       <div className="page-heading">
         <h1>Add your reports</h1>
         <p>
-          Add up to ten de-identified PDFs or clear photos. You will check every extracted value
-          before an explanation is created.
+          Add up to ten de-identified PDFs or clear photos. Vera will read and check the details,
+          then explain them in simple language.
         </p>
       </div>
 
@@ -372,7 +372,7 @@ export function DocumentsStep({
           onClick={onContinue}
           type="button"
         >
-          {busy ? "Reading and checking reports…" : "Continue to review"}
+          {busy ? "Reading and explaining your reports…" : "Explain my reports"}
           {!busy ? <ArrowRight aria-hidden="true" /> : <span className="spinner" aria-hidden="true" />}
         </button>
       </div>
