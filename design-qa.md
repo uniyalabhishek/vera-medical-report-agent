@@ -18,3 +18,21 @@ Render checked: localhost in Chrome at the existing 430 px mobile viewport.
 Remaining P3 difference: device status-bar and phone-frame chrome are not reproduced because the implementation is a responsive web app.
 
 Final result: passed
+
+## Polish pass (2026-08-15, evening)
+
+Rechecked against `Vera - Medical Report Agent.html` at desktop and 430 px widths.
+
+- Ask Vera: the question input starts empty with the reference placeholder ("Ask about any result…"); example questions use neutral suggestion pills; answers stay in warm paper cards without patient-facing source controls.
+- Range visual: cool grey track replaced with the reference treatment — warm sand track, mint typical band, solid amber result dot.
+- Timeline: warm line and dot borders; the current point is a filled amber dot.
+- Removed remaining cool blue-greys (placeholders, answer-panel border, evidence highlight now sage).
+- Summary screen uses a compact localized date-and-document line above the main serif heading.
+
+## Pre-commit accessibility pass (2026-08-16)
+
+- Rechecked the complete synthetic flow in Chrome at 430 px and the Hindi first screen in the centered desktop shell.
+- Core help text and controls now use readable text sizes and at least 44 px primary touch targets.
+- “See picture explanation” is a visible localized action, not an unexplained icon.
+- Summary actions stay in normal document flow and do not cover the trend or prescription.
+- No application console error appeared; observed warnings came from installed browser extensions.

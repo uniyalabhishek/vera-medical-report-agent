@@ -1,11 +1,18 @@
 import { upload as uploadBlob } from "@vercel/blob/client";
-import type { CaseView, Fact, Intake, QuestionResponse } from "@/lib/contracts";
+import type {
+  CaseView,
+  DocumentCategory,
+  Intake,
+  QuestionResponse,
+} from "@/lib/contracts";
 
 type SessionResponse = {
   csrfToken: string;
   expiresAt: string;
   dataMode: "synthetic_only" | "live_enabled";
   storageMode: "local" | "cloud";
+  speechInput: boolean;
+  speechOutput: boolean;
 };
 
 type UploadResponse = {
@@ -14,8 +21,15 @@ type UploadResponse = {
     displayName: string;
     mimeType: string;
     sizeBytes: number;
+    category: DocumentCategory;
   }>;
 };
+
+function voiceFilename(audio: Blob) {
+  return audio.type.split(";", 1)[0].toLocaleLowerCase("en-IN") === "audio/mp4"
+    ? "voice.mp4"
+    : "voice.webm";
+}
 
 export class ClientApiError extends Error {
   constructor(
@@ -59,7 +73,16 @@ class MedicalReportApi {
     }
   }
 
-  private async mutation<T>(url: string, init: RequestInit): Promise<T> {
+  resetSession() {
+    this.csrfToken = "";
+    this.initialization = null;
+  }
+
+  private async authenticatedFetch(
+    url: string,
+    init: RequestInit,
+    mayRetry = true,
+  ): Promise<Response> {
     if (!this.csrfToken) await this.initialize();
 
     const headers = new Headers(init.headers);
@@ -72,7 +95,19 @@ class MedicalReportApi {
       ...init,
       headers,
       credentials: "same-origin",
+      cache: "no-store",
     });
+
+    if (mayRetry && (response.status === 401 || response.status === 403)) {
+      this.resetSession();
+      await this.initialize();
+      return this.authenticatedFetch(url, init, false);
+    }
+    return response;
+  }
+
+  private async mutation<T>(url: string, init: RequestInit): Promise<T> {
+    const response = await this.authenticatedFetch(url, init);
 
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as
@@ -89,6 +124,21 @@ class MedicalReportApi {
     return (await response.json()) as T;
   }
 
+  async getCase(caseId: string) {
+    const response = await this.authenticatedFetch(`/api/cases/${caseId}`, { method: "GET" });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as
+        | { error?: { code?: string; message?: string } }
+        | null;
+      throw new ClientApiError(
+        body?.error?.code ?? "REQUEST_FAILED",
+        body?.error?.message ?? "The case could not be opened.",
+        response.status,
+      );
+    }
+    return ((await response.json()) as { case: CaseView }).case;
+  }
+
   async createCase(intake: Intake, mode: "demo" | "uploaded") {
     const body = await this.mutation<{ case: CaseView }>("/api/cases", {
       method: "POST",
@@ -97,11 +147,12 @@ class MedicalReportApi {
     return body.case;
   }
 
-  async uploadFiles(caseId: string, files: File[]) {
+  async uploadFiles(caseId: string, files: Array<{ file: File; category: DocumentCategory }>) {
     if (!this.csrfToken) await this.initialize();
     if (this.storageMode === "cloud") {
       const completed: UploadResponse["uploads"] = [];
-      for (const file of files) {
+      for (const [index, selected] of files.entries()) {
+        const { file, category } = selected;
         const extension = file.type === "application/pdf"
           ? "pdf"
           : file.type === "image/png" ? "png" : "jpg";
@@ -114,7 +165,12 @@ class MedicalReportApi {
         });
         const finalized = await this.mutation<UploadResponse>(`/api/cases/${caseId}/uploads`, {
           method: "POST",
-          body: JSON.stringify({ pathname: blob.pathname, displayName: file.name }),
+          body: JSON.stringify({
+            pathname: blob.pathname,
+            displayName: file.name,
+            category,
+            complete: index === files.length - 1,
+          }),
         });
         completed.push(...finalized.uploads);
       }
@@ -122,7 +178,8 @@ class MedicalReportApi {
     }
 
     const form = new FormData();
-    files.forEach((file) => form.append("files", file));
+    files.forEach(({ file }) => form.append("files", file));
+    form.append("categories", JSON.stringify(files.map(({ category }) => category)));
     return this.mutation<UploadResponse>(`/api/cases/${caseId}/uploads`, {
       method: "POST",
       body: form,
@@ -137,10 +194,10 @@ class MedicalReportApi {
     return body.case;
   }
 
-  async confirm(caseId: string, facts: Fact[]) {
+  async confirm(caseId: string) {
     const body = await this.mutation<{ case: CaseView }>(
       `/api/cases/${caseId}/confirmation`,
-      { method: "POST", body: JSON.stringify({ facts }) },
+      { method: "POST", body: JSON.stringify({}) },
     );
     return body.case;
   }
@@ -155,6 +212,71 @@ class MedicalReportApi {
 
   async deleteCase(caseId: string) {
     await this.mutation<void>(`/api/cases/${caseId}`, { method: "DELETE" });
+  }
+
+  async transcribe(caseId: string, audio: Blob) {
+    const form = new FormData();
+    form.append("audio", audio, voiceFilename(audio));
+    const body = await this.mutation<{ transcript: string }>(
+      `/api/cases/${caseId}/speech/transcribe`,
+      { method: "POST", body: form },
+    );
+    return body.transcript;
+  }
+
+  async transcribeIntake(language: Intake["language"], audio: Blob) {
+    const form = new FormData();
+    form.append("audio", audio, voiceFilename(audio));
+    form.append("language", language);
+    const body = await this.mutation<{ transcript: string }>(
+      "/api/speech/transcribe",
+      { method: "POST", body: form },
+    );
+    return body.transcript;
+  }
+
+  async speak(caseId: string, text: string) {
+    const response = await this.authenticatedFetch(
+      `/api/cases/${caseId}/speech/synthesize`,
+      { method: "POST", body: JSON.stringify({ text }) },
+    );
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as
+        | { error?: { code?: string; message?: string } }
+        | null;
+      throw new ClientApiError(
+        body?.error?.code ?? "SPEECH_FAILED",
+        body?.error?.message ?? "Audio could not be created.",
+        response.status,
+      );
+    }
+    return response.blob();
+  }
+
+  async createVisualExplanation(caseId: string) {
+    const response = await this.authenticatedFetch(
+      `/api/cases/${caseId}/visual-explanation`,
+      { method: "POST", body: JSON.stringify({}) },
+    );
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as
+        | { error?: { code?: string; message?: string } }
+        | null;
+      throw new ClientApiError(
+        body?.error?.code ?? "VISUAL_FAILED",
+        body?.error?.message ?? "The visual explanation could not be created.",
+        response.status,
+      );
+    }
+    const image = await response.blob();
+    if (image.type !== "image/jpeg" || image.size === 0) {
+      throw new ClientApiError(
+        "VISUAL_FAILED",
+        "The visual explanation could not be created.",
+        502,
+      );
+    }
+    return image;
   }
 }
 

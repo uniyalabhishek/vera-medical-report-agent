@@ -1,5 +1,7 @@
 # Medical Report Explainer: Product and System Architecture
 
+> **Research reference, not the shipped implementation specification.** This document preserves the full model, safety, privacy, and production architecture research. Some recommendations below, especially mandatory user review of every critical field, describe a future safety option and do not match the current four-screen buildathon UX. For current decisions, read [Final MVP Architecture](./medical-report-explainer-final-architecture.md). For repository and deployment state, read [Agent Handoff](./AGENT_HANDOFF.md).
+
 **Decision date:** 15 August 2026  
 **Stage:** Buildathon architecture, with a safe path toward production  
 **Working descriptor:** Medical Report Explainer  

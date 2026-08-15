@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { cleanCitationLabel, cleanDisplayText } from "@/lib/display-text";
+import {
+  cleanCitationLabel,
+  cleanDisplayText,
+  formatMedicationInstruction,
+} from "@/lib/display-text";
 
 describe("cleanDisplayText", () => {
   it("removes internal source IDs and their empty wrapper", () => {
@@ -17,5 +21,25 @@ describe("cleanDisplayText", () => {
         "e8bb8dc3-6461-4bc4-b96b-666fb1c043b2_TC-01__Uncontrolled_Type_2_Diabetes_with_early_complications_(Hindi).pdf · page 2",
       ),
     ).toBe("Uncontrolled Type 2 Diabetes with early compl… · page 2");
+  });
+
+  it("omits medication fields that were not stated in the prescription", () => {
+    expect(
+      formatMedicationInstruction({
+        medicine: "METFORMIN",
+        dose: "1000 mg",
+        frequency: "1-0-1 after food",
+        duration: "not provided",
+      }),
+    ).toBe("METFORMIN 1000 mg · 1-0-1 after food");
+
+    expect(
+      formatMedicationInstruction({
+        medicine: "TELMISARTAN",
+        dose: "40 mg",
+        frequency: "not specified",
+        duration: "",
+      }),
+    ).toBe("TELMISARTAN 40 mg");
   });
 });

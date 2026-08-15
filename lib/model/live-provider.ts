@@ -7,6 +7,7 @@ import { SarvamAIClient } from "sarvamai";
 import { z } from "zod";
 import type {
   Analysis,
+  DocumentCategory,
   Fact,
   QuestionResponse,
   SourceSpan,
@@ -23,6 +24,13 @@ import {
   ProviderConfigurationError,
   ProviderProcessingError,
 } from "@/lib/model/provider";
+import { classifyMedicalValue, parseMedicalRange } from "@/lib/medical-range";
+import {
+  extractStandaloneNumericClaims,
+  normalizeOptionalExtractedText,
+  sourceContainsLiteral,
+  sourceFieldsShareWindow,
+} from "@/lib/source-binding";
 
 const EXTRACTION_MODEL = process.env.OPENAI_EXTRACTION_MODEL?.trim() || "gpt-5.6-terra";
 const SYNTHESIS_MODEL = process.env.OPENAI_SYNTHESIS_MODEL?.trim() || "gpt-5.6-sol";
@@ -34,6 +42,10 @@ const TERMINAL_SARVAM_STATUSES = new Set([
   "rejected",
 ]);
 const MAX_OCR_CHARACTERS = 160_000;
+const OCR_CONCURRENCY = 5;
+const MIN_EXTRACTION_CONFIDENCE = 0.9;
+const MAX_CARD_WORDS = 55;
+const MAX_ANSWER_CHARACTERS = 500;
 
 const languageCodes = {
   English: "en-IN",
@@ -42,6 +54,51 @@ const languageCodes = {
   Kannada: "kn-IN",
   Marathi: "mr-IN",
 } as const;
+
+const pageLabels = {
+  English: "page",
+  Hindi: "पेज",
+  Tamil: "பக்கம்",
+  Kannada: "ಪುಟ",
+  Marathi: "पान",
+} as const;
+
+const boundaryPatterns: Record<
+  keyof typeof languageCodes,
+  { clinical: RegExp; medicine: RegExp; action: RegExp }
+> = {
+  English: {
+    clinical: /\b(diagnos|treat|cure|do i have)\b/iu,
+    medicine: /\b(medicine|medication|tablet|pill|dose)\b/iu,
+    action: /\b(start|stop|increase|decrease|change|adjust|skip|missed)\b/iu,
+  },
+  Hindi: {
+    clinical: /(बीमारी|निदान|इलाज)/iu,
+    medicine: /(दवा|दवाई|खुराक|गोली)/iu,
+    action: /(शुरू|बंद|कम|ज्यादा|बदल|छोड़)/iu,
+  },
+  Tamil: {
+    clinical: /(நோய்|நோயறிதல்|சிகிச்சை)/iu,
+    medicine: /(மருந்து|மாத்திரை|அளவு)/iu,
+    action: /(தொடங்க|நிறுத்த|குறை|அதிக|மாற்ற|தவிர்)/iu,
+  },
+  Kannada: {
+    clinical: /(ರೋಗ|ರೋಗನಿರ್ಣಯ|ಚಿಕಿತ್ಸೆ)/iu,
+    medicine: /(ಔಷಧ|ಮಾತ್ರೆ|ಪ್ರಮಾಣ)/iu,
+    action: /(ಪ್ರಾರಂಭ|ನಿಲ್ಲಿಸ|ಕಡಿಮೆ|ಹೆಚ್ಚು|ಬದಲ|ಬಿಟ್ಟು)/iu,
+  },
+  Marathi: {
+    clinical: /(रोग|निदान|उपचार)/iu,
+    medicine: /(औषध|गोळी|डोस)/iu,
+    action: /(सुरू|बंद|कमी|जास्त|बदल|थांब|चुक)/iu,
+  },
+};
+
+function isBoundaryQuestion(language: keyof typeof languageCodes, question: string) {
+  const patterns = boundaryPatterns[language];
+  return patterns.clinical.test(question) ||
+    (patterns.medicine.test(question) && patterns.action.test(question));
+}
 
 const boundaryCopy = {
   English: {
@@ -71,6 +128,7 @@ type OcrPage = {
   documentName: string;
   page: number;
   text: string;
+  documentCategory: DocumentCategory;
 };
 
 type SarvamRuntimePage = {
@@ -83,7 +141,7 @@ type SarvamRuntimePage = {
 const CandidateSourceSchema = z.object({
   documentId: z.string(),
   page: z.number().int().positive(),
-  excerpt: z.string().min(3).max(1_200),
+  excerpt: z.string().min(3).max(500),
   confidence: z.number().min(0).max(1),
 });
 
@@ -94,7 +152,7 @@ const ObservationCandidateSchema = z.object({
   unit: z.string(),
   referenceRange: z.string(),
   flag: z.enum(["high", "low", "normal", "not_provided"]),
-  effectiveDate: z.string(),
+  effectiveDate: z.union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2}$/u)]),
   source: CandidateSourceSchema,
 });
 
@@ -181,29 +239,10 @@ function wait(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function normalizeForMatch(value: string) {
-  return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase("en-IN");
-}
-
-function numericFlag(
-  value: string,
-  range: string,
-  fallback: "high" | "low" | "normal" | "not_provided",
-) {
-  const measured = Number(value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)?.[0]);
-  const limits = range.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/g)?.map(Number);
-  if (!Number.isFinite(measured) || !limits || limits.length < 2) return fallback;
-  const low = Math.min(limits[0], limits[1]);
-  const high = Math.max(limits[0], limits[1]);
-  if (measured < low) return "low" as const;
-  if (measured > high) return "high" as const;
-  return "normal" as const;
-}
-
-function sourceCitation(fact: Fact) {
+function sourceCitation(fact: Fact, language: keyof typeof languageCodes) {
   return {
     sourceSpanId: fact.source.id,
-    label: `${fact.source.documentName} · page ${fact.source.page}`,
+    label: `${fact.source.documentName} · ${pageLabels[language]} ${fact.source.page}`,
   };
 }
 
@@ -237,10 +276,14 @@ async function digitiseDocument(
   });
 
   let status = "";
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  let terminalResponse: Awaited<ReturnType<typeof client.docAi.getStatus>> | null = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     const response = await client.docAi.getStatus(started.job_id);
     status = response.status.toLocaleLowerCase("en-IN");
-    if (TERMINAL_SARVAM_STATUSES.has(status)) break;
+    if (TERMINAL_SARVAM_STATUSES.has(status)) {
+      terminalResponse = response;
+      break;
+    }
     await wait(1_500);
   }
 
@@ -249,9 +292,22 @@ async function digitiseDocument(
       `Digitisation timed out for ${document.name}. Try a smaller or clearer file.`,
     );
   }
-  if (status === "failed" || status === "rejected") {
+  if (status !== "completed") {
     throw new ProviderProcessingError(
       `Sarvam could not read ${document.name}. Try a clear PDF, JPG, or PNG.`,
+    );
+  }
+  const usage = terminalResponse?.usage;
+  const totalPages = usage?.pages_total;
+  if (
+    !Number.isInteger(totalPages) ||
+    !totalPages ||
+    usage?.pages_failed !== 0 ||
+    usage.pages_succeeded !== totalPages ||
+    usage.pages_processed !== totalPages
+  ) {
+    throw new ProviderProcessingError(
+      `Sarvam did not confirm every page in ${document.name}. Try a clear PDF, JPG, or PNG.`,
     );
   }
 
@@ -275,13 +331,19 @@ async function digitiseDocument(
         documentName: document.name,
         page: pageNumber,
         text,
+        documentCategory: document.category,
       }];
     });
   });
 
-  if (pages.length === 0) {
+  const pageNumbers = [...new Set(pages.map((page) => page.page))].sort((left, right) => left - right);
+  const everyPagePresent =
+    pages.length === totalPages &&
+    pageNumbers.length === totalPages &&
+    pageNumbers.every((pageNumber, index) => pageNumber === index + 1);
+  if (!everyPagePresent) {
     throw new ProviderProcessingError(
-      `No readable text was found in ${document.name}. Try a clearer scan.`,
+      `Readable text was not returned for every page in ${document.name}. Try a clearer scan.`,
     );
   }
   return pages;
@@ -298,9 +360,37 @@ function buildFacts(
   for (const candidate of output.facts) {
     const page = pageByKey.get(`${candidate.source.documentId}:${candidate.source.page}`);
     if (!page) continue;
+    if (candidate.source.confidence < MIN_EXTRACTION_CONFIDENCE) continue;
 
     const excerpt = candidate.source.excerpt.trim();
-    if (!normalizeForMatch(page.text).includes(normalizeForMatch(excerpt))) continue;
+    if (!sourceContainsLiteral(page.text, excerpt)) continue;
+
+    const fieldsInExcerpt = candidate.kind === "observation"
+      ? [
+          candidate.name,
+          candidate.value,
+          normalizeOptionalExtractedText(candidate.unit),
+          normalizeOptionalExtractedText(candidate.referenceRange),
+          normalizeOptionalExtractedText(candidate.effectiveDate),
+        ]
+      : [
+          candidate.medicine,
+          normalizeOptionalExtractedText(candidate.dose),
+          normalizeOptionalExtractedText(candidate.frequency),
+          normalizeOptionalExtractedText(candidate.duration),
+        ];
+    if (fieldsInExcerpt.some((field) => !sourceContainsLiteral(excerpt, field))) continue;
+    if (!sourceFieldsShareWindow(excerpt, fieldsInExcerpt, 240)) continue;
+    if (
+      candidate.kind === "observation" &&
+      normalizeOptionalExtractedText(candidate.effectiveDate) &&
+      !sourceContainsLiteral(
+        excerpt,
+        normalizeOptionalExtractedText(candidate.effectiveDate),
+      )
+    ) {
+      continue;
+    }
 
     const dedupeKey = candidate.kind === "observation"
       ? `o:${candidate.name}:${candidate.value}:${candidate.unit}:${page.documentId}:${page.page}`
@@ -315,24 +405,50 @@ function buildFacts(
       page: page.page,
       excerpt,
       bbox: [0, 0, 1, 1],
+      documentCategory: page.documentCategory,
     };
     const base = {
       id: `fact_${randomUUID()}`,
-      confirmed: false,
-      needsReview: true,
+      confirmed: true,
+      needsReview: false,
       source,
     };
 
     if (candidate.kind === "observation") {
+      const unit = normalizeOptionalExtractedText(candidate.unit);
+      const referenceRange = normalizeOptionalExtractedText(candidate.referenceRange);
+      const effectiveDate = normalizeOptionalExtractedText(candidate.effectiveDate);
+      const numericRange = referenceRange ? parseMedicalRange(referenceRange) : null;
+      const position = numericRange
+        ? classifyMedicalValue(candidate.value, referenceRange)
+        : null;
       facts.push({
         ...base,
         ...candidate,
-        flag: numericFlag(candidate.value, candidate.referenceRange, candidate.flag),
+        unit,
+        referenceRange,
+        numericRange,
+        effectiveDate,
+        flag: position === "below"
+          ? "low"
+          : position === "above"
+            ? "high"
+            : position === "within"
+              ? "normal"
+              : "not_provided",
         source,
         kind: "observation",
       });
     } else {
-      facts.push({ ...base, ...candidate, source, kind: "medication" });
+      facts.push({
+        ...base,
+        ...candidate,
+        dose: normalizeOptionalExtractedText(candidate.dose),
+        frequency: normalizeOptionalExtractedText(candidate.frequency),
+        duration: normalizeOptionalExtractedText(candidate.duration),
+        source,
+        kind: "medication",
+      });
     }
   }
 
@@ -358,10 +474,44 @@ function validateAnalysisDraft(
     throw new ProviderProcessingError("The explanation contained an invalid source reference.");
   }
 
-  const documents = draft.cards.find((card) => card.id === "documents");
-  const findings = draft.cards.find((card) => card.id === "findings");
-  if (!documents?.sourceSpanIds.length || !findings?.sourceSpanIds.length) {
+  const requiredSourceCards = draft.cards.filter((card) =>
+    card.id === "documents" || card.id === "findings"
+  );
+  if (requiredSourceCards.some((card) => card.sourceSpanIds.length === 0)) {
     throw new ProviderProcessingError("The explanation was not adequately linked to its sources.");
+  }
+  const currentMedicationSourceIds = new Set(
+    facts
+      .filter((fact) =>
+        fact.kind === "medication" && fact.source.documentCategory === "current-prescription"
+      )
+      .map((fact) => fact.source.id),
+  );
+  const instructionsCard = draft.cards.find((card) => card.id === "instructions");
+  if (
+    currentMedicationSourceIds.size > 0 &&
+    instructionsCard?.sourceSpanIds.some((id) => !currentMedicationSourceIds.has(id))
+  ) {
+    throw new ProviderProcessingError(
+      "The current-prescription explanation cited a report or past prescription.",
+    );
+  }
+
+  for (const card of draft.cards) {
+    const wordCount = card.body.trim().split(/\s+/u).filter(Boolean).length;
+    const sentenceCount = card.body
+      .split(/[.!?।॥]+(?:\s+|$)/u)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean).length;
+    if (wordCount > MAX_CARD_WORDS || sentenceCount > 2 || card.body.length > 500) {
+      throw new ProviderProcessingError("The explanation was too long for the simple format.");
+    }
+    if (
+      /(?:fact|span)_[\w-]+/iu.test(`${card.title} ${card.body}`) ||
+      /[*#`]/u.test(`${card.title} ${card.body}`)
+    ) {
+      throw new ProviderProcessingError("The explanation contained internal or formatted text.");
+    }
   }
 }
 
@@ -370,6 +520,7 @@ async function verifyAnalysis(
   caseId: string,
   facts: Fact[],
   draft: z.infer<typeof AnalysisDraftSchema>,
+  intake: SynthesisInput["intake"],
 ) {
   const response = await openai.responses.parse({
     model: SYNTHESIS_MODEL,
@@ -379,12 +530,20 @@ async function verifyAnalysis(
     max_output_tokens: 2_000,
     instructions: [
       "You are the independent safety verifier for a medical-document explainer.",
-      "Use only the confirmed facts supplied in the request.",
+      "Use confirmed facts for every report claim. User context may only be restated or turned into a question for the doctor.",
       "Fail any unsupported patient claim, invented value, diagnosis, cause, prognosis, treatment advice, medication change, or citation mismatch.",
       "A neutral restatement of a written prescription is allowed. Questions to ask a doctor are allowed.",
       "Do not repair the draft. Return only the verification result.",
     ].join(" "),
-    input: JSON.stringify({ confirmedFacts: facts, proposedExplanation: draft }),
+    input: JSON.stringify({
+      confirmedFacts: facts,
+      userContext: {
+        age: intake.age,
+        symptoms: intake.symptoms,
+        medicalHistory: intake.medicalHistory,
+      },
+      proposedExplanation: draft,
+    }),
     text: { format: zodTextFormat(VerificationSchema, "medical_explanation_verification") },
   });
 
@@ -392,6 +551,76 @@ async function verifyAnalysis(
     throw new ProviderProcessingError(
       "The explanation did not pass the independent safety check. No result was shown.",
     );
+  }
+}
+
+function validateAnswerDraft(
+  draft: z.infer<typeof ModelQuestionResponseSchema>,
+  facts: Fact[],
+) {
+  const wordCount = draft.answer.trim().split(/\s+/u).filter(Boolean).length;
+  const sentenceCount = draft.answer
+    .split(/[.!?।॥]+(?:\s+|$)/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean).length;
+  if (
+    draft.answer.length > MAX_ANSWER_CHARACTERS ||
+    wordCount > MAX_CARD_WORDS ||
+    sentenceCount > 2
+  ) {
+    throw new ProviderProcessingError("The answer was too long for the simple format.");
+  }
+
+  const factBySource = new Map(facts.map((fact) => [fact.source.id, fact]));
+  const citedFacts = draft.sourceSpanIds.flatMap((id) => {
+    const fact = factBySource.get(id);
+    return fact ? [fact] : [];
+  });
+  const citedText = citedFacts.map((fact) => fact.kind === "observation"
+    ? [fact.name, fact.value, fact.unit, fact.referenceRange, fact.effectiveDate].join(" ")
+    : [fact.medicine, fact.dose, fact.frequency, fact.duration].join(" ")
+  ).join("\n");
+  const numericClaims = extractStandaloneNumericClaims(draft.answer);
+  if (numericClaims.some((claim) => !sourceContainsLiteral(citedText, claim))) {
+    throw new ProviderProcessingError("The answer contained a value not found in its source.");
+  }
+}
+
+async function verifyAnswer(
+  openai: OpenAI,
+  caseId: string,
+  facts: Fact[],
+  question: string,
+  draft: z.infer<typeof ModelQuestionResponseSchema>,
+  intake: QuestionInput["intake"],
+) {
+  const response = await openai.responses.parse({
+    model: SYNTHESIS_MODEL,
+    reasoning: { effort: "low" },
+    store: false,
+    safety_identifier: safetyIdentifier(caseId),
+    max_output_tokens: 1_000,
+    instructions: [
+      "You are the independent safety verifier for one medical-document answer.",
+      "Pass only when every report claim is directly supported by supplied facts and citations.",
+      "User context may be restated as user-provided context, but it must not be treated as proof of a cause or diagnosis.",
+      "Fail diagnosis, inferred cause, prognosis, treatment advice, medicine changes, unsupported outside knowledge, or a citation mismatch.",
+      "Do not repair the answer. Return only the verification result.",
+    ].join(" "),
+    input: JSON.stringify({
+      facts,
+      userContext: {
+        age: intake.age,
+        symptoms: intake.symptoms,
+        medicalHistory: intake.medicalHistory,
+      },
+      question,
+      proposedAnswer: draft,
+    }),
+    text: { format: zodTextFormat(VerificationSchema, "medical_answer_verification") },
+  });
+  if (!response.output_parsed?.passed) {
+    throw new ProviderProcessingError("The answer did not pass its independent safety check.");
   }
 }
 
@@ -406,8 +635,14 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
 
       const { openai, sarvam } = getClients();
       const pages: OcrPage[] = [];
-      for (const document of input.documents) {
-        pages.push(...await digitiseDocument(sarvam, document, input.intake.language));
+      for (let index = 0; index < input.documents.length; index += OCR_CONCURRENCY) {
+        const batch = input.documents.slice(index, index + OCR_CONCURRENCY);
+        const batchPages = await Promise.all(
+          batch.map((document) =>
+            digitiseDocument(sarvam, document, input.intake.documentLanguage)
+          ),
+        );
+        pages.push(...batchPages.flat());
       }
 
       const characterCount = pages.reduce((total, page) => total + page.text.length, 0);
@@ -429,7 +664,9 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
           "Extract only lab observations and explicitly written medication instructions.",
           "Do not diagnose, infer causes, add advice, normalise doses, or repair missing information.",
           "Preserve names, values, units, ranges, dates, medicine, dose, frequency, and duration as written.",
-          "Use 'not provided' when a field is absent. Set the flag only from the report's own marker or printed range.",
+          "Set effectiveDate only when the cited excerpt contains an exact YYYY-MM-DD date; otherwise use an empty string.",
+          "Use an empty string when an optional field is absent. Never write 'not provided', 'not specified', or another placeholder.",
+          "Keep a printed range only when it appears literally in the cited excerpt. Do not calculate or repair a range.",
           "Every fact must cite one supplied documentId, page, and a short verbatim excerpt present on that page.",
           "Confidence is your confidence that the literal extraction and source link are exact, not medical confidence.",
         ].join(" "),
@@ -440,7 +677,14 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
       if (!response.output_parsed) {
         throw new ProviderProcessingError("The extraction model returned no checked facts.");
       }
-      return buildFacts(response.output_parsed, pages);
+      const facts = buildFacts(response.output_parsed, pages);
+      const coveredDocuments = new Set(facts.map((fact) => fact.source.documentId));
+      if (input.documents.some((document) => !coveredDocuments.has(document.id))) {
+        throw new ProviderProcessingError(
+          "At least one uploaded file could not be linked to an accepted detail. No partial explanation was shown.",
+        );
+      }
+      return facts;
     } catch (error) {
       safeProviderError(error, "extraction");
     }
@@ -462,11 +706,15 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
         instructions: [
           "Create a calm five-part explanation of confirmed medical-document facts.",
           `Write in ${input.intake.language}.`,
-          "Use only the supplied confirmed facts. User context is not evidence and must not become a medical claim.",
+          "Use only the supplied confirmed facts.",
+          "Age, symptoms, and medical history are user-provided context, not report facts.",
+          "Use that context only in the questions card and suggested questions. You may restate it and ask whether it could relate to a reported result, but never claim that it does.",
           "Never diagnose, infer a cause, predict an outcome, recommend treatment, or advise starting, stopping, or changing medicine.",
-          "Restate written prescription instructions exactly and label them as a restatement.",
+          "Keep medicine names, numeric doses, units, and duration numbers exact. Translate ordinary instruction words into the selected language without adding meaning, and label them as a restatement.",
+          "The instructions card may describe only facts from current-prescription documents. Never present a past-prescription medicine as current.",
+          "Omit empty prescription fields. Do not replace them with a missing-value label.",
           "The cards must be in this order: documents, findings, changes, instructions, questions.",
-          "For changes, compare only the same named observation when two dated facts exist; otherwise state that the documents do not show a trend.",
+          "For changes, compare only the same named observation with the same unit and two valid dates; otherwise state that the documents do not show a safe comparison.",
           "For every document-based statement, include the relevant source span IDs. Do not invent source IDs.",
           "Put source span IDs only in sourceSpanIds. Never include them in a title, body, or suggested question.",
           "Do not use Markdown, bullets, or internal identifiers in titles or bodies.",
@@ -474,12 +722,12 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
           "Write for a reader with low medical and digital literacy. Prefer common words and avoid dense lists.",
         ].join(" "),
         input: JSON.stringify({
+          confirmedFacts: input.facts,
           userContext: {
             age: input.intake.age,
             symptoms: input.intake.symptoms,
             medicalHistory: input.intake.medicalHistory,
           },
-          confirmedFacts: input.facts,
         }),
         text: { format: zodTextFormat(AnalysisDraftSchema, "medical_explanation") },
       });
@@ -489,7 +737,7 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
         throw new ProviderProcessingError("The explanation model returned no checked result.");
       }
       validateAnalysisDraft(draft, input.facts);
-      await verifyAnalysis(openai, input.caseId, input.facts, draft);
+      await verifyAnalysis(openai, input.caseId, input.facts, draft, input.intake);
 
       const factBySource = new Map(input.facts.map((fact) => [fact.source.id, fact]));
       return {
@@ -500,7 +748,9 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
           id: card.id,
           title: cleanDisplayText(card.title),
           body: cleanDisplayText(card.body),
-          citations: card.sourceSpanIds.map((id) => sourceCitation(factBySource.get(id)!)),
+          citations: card.sourceSpanIds.map((id) =>
+            sourceCitation(factBySource.get(id)!, input.intake.language)
+          ),
         })),
         suggestedQuestions: draft.suggestedQuestions.map(cleanDisplayText),
       };
@@ -512,13 +762,17 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
   async answer(input: QuestionInput): Promise<QuestionResponse> {
     try {
       const normalized = input.question.toLocaleLowerCase("en-IN");
-      const medicationFacts = input.facts.filter((fact) => fact.kind === "medication");
-      if (/\b(should i|do i have|diagnos|treat|cure|start|stop|increase|decrease|change|dose|missed)\b/.test(normalized)) {
+      const medicationFacts = input.facts.filter((fact) =>
+        fact.kind === "medication" && fact.source.documentCategory === "current-prescription"
+      );
+      if (isBoundaryQuestion(input.intake.language, normalized)) {
         const copy = boundaryCopy[input.intake.language];
         return {
           answerType: "boundary",
           answer: copy.answer,
-          citations: medicationFacts.map(sourceCitation),
+          citations: medicationFacts.map((fact) =>
+            sourceCitation(fact, input.intake.language)
+          ),
           doctorQuestion: copy.doctorQuestion,
         };
       }
@@ -533,15 +787,22 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
         instructions: [
           "Answer a question about confirmed medical-document facts.",
           `Write in ${input.intake.language}.`,
-          "Use only the supplied facts and approved explanation. Do not use outside knowledge.",
+          "Use supplied facts, approved explanation, and the user's own context. Do not use outside knowledge.",
+          "You may restate a symptom or history item as user-provided context, but never infer that it caused a result.",
           "Do not diagnose, infer causes, recommend treatment, or advise medicine changes.",
           "If the documents do not answer the question, say so and suggest one concise question for the doctor.",
           "Cite only supplied source span IDs. A document_fact or approved_explanation answer must have a citation.",
           "Put source span IDs only in sourceSpanIds. Never include them in answer or doctorQuestion.",
+          "Use one or two short sentences and no more than 55 words.",
         ].join(" "),
         input: JSON.stringify({
           confirmedFacts: input.facts,
           approvedExplanation: input.analysis,
+          userContext: {
+            age: input.intake.age,
+            symptoms: input.intake.symptoms,
+            medicalHistory: input.intake.medicalHistory,
+          },
           question: input.question,
         }),
         text: { format: zodTextFormat(ModelQuestionResponseSchema, "medical_document_answer") },
@@ -559,11 +820,15 @@ export class LiveMedicalReportProvider implements MedicalReportProvider {
       ) {
         throw new ProviderProcessingError("The answer was not linked to a source.");
       }
+      validateAnswerDraft(draft, input.facts);
+      await verifyAnswer(openai, input.caseId, input.facts, input.question, draft, input.intake);
 
       return {
         answerType: draft.answerType,
         answer: cleanDisplayText(draft.answer),
-        citations: draft.sourceSpanIds.map((id) => sourceCitation(factBySource.get(id)!)),
+        citations: draft.sourceSpanIds.map((id) =>
+          sourceCitation(factBySource.get(id)!, input.intake.language)
+        ),
         ...(draft.doctorQuestion ? { doctorQuestion: cleanDisplayText(draft.doctorQuestion) } : {}),
       };
     } catch (error) {

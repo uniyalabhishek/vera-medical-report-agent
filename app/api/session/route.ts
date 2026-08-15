@@ -25,6 +25,8 @@ export async function GET(request: NextRequest) {
       csrfToken: session.csrfToken,
       expiresAt: new Date(session.expiresAt).toISOString(),
       dataMode: capabilities.liveAnalysis ? "live_enabled" as const : "synthetic_only" as const,
+      speechInput: capabilities.speechInput,
+      speechOutput: capabilities.speechOutput,
       storageMode: process.env.DATABASE_URL && process.env.BLOB_READ_WRITE_TOKEN
         ? "cloud" as const
         : "local" as const,

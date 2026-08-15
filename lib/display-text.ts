@@ -1,5 +1,15 @@
 const SOURCE_SPAN_ID = /span_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const UUID_PREFIX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/i;
+const ABSENT_FIELD_VALUES = new Set([
+  "",
+  "-",
+  "n/a",
+  "na",
+  "not provided",
+  "not specified",
+  "not stated",
+  "unknown",
+]);
 
 export function cleanDisplayText(value: string) {
   return value
@@ -12,7 +22,7 @@ export function cleanDisplayText(value: string) {
     .trim();
 }
 
-export function cleanCitationLabel(value: string) {
+export function cleanCitationLabel(value: string, fallbackLabel = "Uploaded report") {
   const [rawName, ...locationParts] = value.split(/\s+·\s+/);
   const readableName = rawName
     .replace(UUID_PREFIX, "")
@@ -24,5 +34,23 @@ export function cleanCitationLabel(value: string) {
   const shortName = readableName.length > 48
     ? `${readableName.slice(0, 45).trimEnd()}…`
     : readableName;
-  return [shortName || "Uploaded report", ...locationParts].join(" · ");
+  return [shortName || fallbackLabel, ...locationParts].join(" · ");
+}
+
+export function formatMedicationInstruction(instruction: {
+  medicine: string;
+  dose: string;
+  frequency: string;
+  duration: string;
+}) {
+  return [
+    [instruction.medicine, instruction.dose]
+      .filter((value) => !ABSENT_FIELD_VALUES.has(value.trim().toLocaleLowerCase("en-IN")))
+      .join(" "),
+    instruction.frequency,
+    instruction.duration,
+  ]
+    .map((value) => value.trim())
+    .filter((value) => !ABSENT_FIELD_VALUES.has(value.toLocaleLowerCase("en-IN")))
+    .join(" · ");
 }

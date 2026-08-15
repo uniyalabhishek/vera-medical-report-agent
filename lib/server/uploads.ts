@@ -5,6 +5,7 @@ import { rmSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { DocumentCategory } from "@/lib/contracts";
 import { ApiError } from "@/lib/server/api-error";
 import { getDataDirectory } from "@/lib/server/data-path";
 import { getStorageMode } from "@/lib/server/storage-mode";
@@ -68,7 +69,7 @@ function validateBytes(bytes: Uint8Array) {
   return detected;
 }
 
-export async function storeUpload(caseId: string, file: File) {
+export async function storeUpload(caseId: string, file: File, category: DocumentCategory) {
   if (!CASE_ID_PATTERN.test(caseId)) {
     throw new ApiError(400, "INVALID_CASE_ID", "The case identifier is invalid.");
   }
@@ -92,6 +93,7 @@ export async function storeUpload(caseId: string, file: File) {
     mimeType: detected.mimeType,
     sizeBytes: file.size,
     sourceMode: "uploaded" as const,
+    category,
   };
 }
 
@@ -113,7 +115,12 @@ async function readCloudUpload(caseId: string, storedName: string) {
   return { bytes, blob: result.blob };
 }
 
-export async function finalizeCloudUpload(caseId: string, storedName: string, displayName: string) {
+export async function finalizeCloudUpload(
+  caseId: string,
+  storedName: string,
+  displayName: string,
+  category: DocumentCategory,
+) {
   if (getStorageMode() !== "cloud") {
     throw new ApiError(409, "LOCAL_UPLOAD_REQUIRED", "Use the local upload flow.");
   }
@@ -130,6 +137,7 @@ export async function finalizeCloudUpload(caseId: string, storedName: string, di
       mimeType: detected.mimeType,
       sizeBytes: bytes.byteLength,
       sourceMode: "uploaded" as const,
+      category,
     };
   } catch (error) {
     if (ownedPath) await del(storedName).catch(() => undefined);
@@ -142,6 +150,15 @@ export async function getStoredUploadData(caseId: string, storedName: string) {
     return (await readCloudUpload(caseId, storedName)).bytes;
   }
   return new Uint8Array(await readFile(getStoredUploadPath(caseId, storedName)));
+}
+
+export async function deleteStoredUpload(caseId: string, storedName: string) {
+  if (getStorageMode() === "cloud") {
+    assertCloudStoredName(caseId, storedName);
+    await del(storedName);
+    return;
+  }
+  await rm(getStoredUploadPath(caseId, storedName), { force: true });
 }
 
 export function getStoredUploadPath(caseId: string, storedName: string) {

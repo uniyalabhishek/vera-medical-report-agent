@@ -55,9 +55,11 @@ export async function ensureCloudSchema() {
         mime_type TEXT NOT NULL,
         size_bytes BIGINT NOT NULL,
         source_mode TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'report',
         created_at BIGINT NOT NULL
       )
     `);
+    await sql.query("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'report'");
     await sql.query(`
       CREATE TABLE IF NOT EXISTS conversation_turns (
         id TEXT PRIMARY KEY,

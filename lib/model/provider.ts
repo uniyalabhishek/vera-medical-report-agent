@@ -1,4 +1,10 @@
-import type { Analysis, Fact, Intake, QuestionResponse } from "@/lib/contracts";
+import type {
+  Analysis,
+  DocumentCategory,
+  Fact,
+  Intake,
+  QuestionResponse,
+} from "@/lib/contracts";
 
 export type ExtractionInput = {
   caseId: string;
@@ -13,6 +19,7 @@ export type ProviderDocument = {
   mimeType: string;
   sizeBytes: number;
   data: Uint8Array;
+  category: DocumentCategory;
 };
 
 export type SynthesisInput = {

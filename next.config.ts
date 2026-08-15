@@ -9,6 +9,7 @@ const contentSecurityPolicy = [
   "font-src 'self' data:",
   `connect-src 'self' https://vercel.com https://blob.vercel-storage.com https://*.blob.vercel-storage.com${isProduction ? "" : " ws: wss:"}`,
   "media-src 'self' blob:",
+  "frame-src 'self'",
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'self'",
@@ -25,18 +26,33 @@ const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   {
     key: "Permissions-Policy",
-    value: "camera=(), geolocation=(), microphone=(), browsing-topics=()",
+    value: "camera=(), geolocation=(), microphone=(self), browsing-topics=()",
   },
   ...(isProduction
     ? [{ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" }]
     : []),
 ];
 
+const sourceDocumentSecurityHeaders = [
+  {
+    key: "Content-Security-Policy",
+    value: "default-src 'none'; frame-ancestors 'self'",
+  },
+  { key: "X-Frame-Options", value: "SAMEORIGIN" },
+];
+
 const nextConfig: NextConfig = {
+  devIndicators: false,
   poweredByHeader: false,
   reactStrictMode: true,
   async headers() {
-    return [{ source: "/(.*)", headers: securityHeaders }];
+    return [
+      { source: "/(.*)", headers: securityHeaders },
+      {
+        source: "/api/cases/:caseId/uploads/:uploadId",
+        headers: sourceDocumentSecurityHeaders,
+      },
+    ];
   },
 };
 

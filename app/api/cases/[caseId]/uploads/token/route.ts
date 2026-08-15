@@ -17,7 +17,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
     }
     const session = await requireMutationSession(request);
     const { caseId } = await context.params;
-    await getOwnedCase(caseId, session.tokenHash);
+    const caseView = await getOwnedCase(caseId, session.tokenHash);
+    if (caseView.state !== "DRAFT" && caseView.state !== "UPLOADED") {
+      throw new ApiError(409, "UPLOADS_CLOSED", "Uploads are closed after report reading starts.");
+    }
     if ((await listUploads(caseId, session.tokenHash)).length >= MAX_FILES) {
       throw new ApiError(400, "TOO_MANY_FILES", "A case can contain at most 10 files.");
     }

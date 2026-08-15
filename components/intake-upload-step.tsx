@@ -1,387 +1,564 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
-  ArrowRight,
+  Check,
   CheckCircle2,
   FileText,
-  Mic,
-  ShieldCheck,
+  LoaderCircle,
+  Plus,
   Upload,
   X,
 } from "lucide-react";
-import { supportedLanguages, type Intake } from "@/lib/contracts";
+import {
+  supportedLanguages,
+  type DocumentCategory,
+  type Intake,
+} from "@/lib/contracts";
+import { getMessages, languageMeta, message } from "@/lib/i18n";
+import { ProgressStepper } from "@/components/progress-stepper";
+import { VoiceInputButton } from "@/components/voice-controls";
 
-const languageLabels: Record<Intake["language"], string> = {
-  English: "English",
-  Hindi: "हिन्दी",
-  Tamil: "தமிழ்",
-  Kannada: "ಕನ್ನಡ",
-  Marathi: "मराठी",
+export type IntakeDraft = {
+  preferredName: string;
+  age: string;
+  language: Intake["language"];
+  documentLanguage: Intake["documentLanguage"];
+  symptoms: string;
+  medicalHistory: string;
 };
 
-export type IntakeDraft = Omit<Intake, "age"> & { age: string };
+export type SelectedDocument = {
+  id: string;
+  file: File;
+  category: DocumentCategory;
+};
+
+export type ProcessingStage = "uploading" | "reading" | "writing";
 
 type AboutStepProps = {
   draft: IntakeDraft;
   busy: boolean;
   sessionReady: boolean;
-  liveLanguagesEnabled: boolean;
+  speechInputEnabled: boolean;
   error: string | null;
   onDraftChange: (draft: IntakeDraft) => void;
   onContinue: () => void;
+  onRetrySession: () => void;
 };
 
 type DocumentsStepProps = {
-  files: File[];
+  files: SelectedDocument[];
   useSample: boolean;
-  consented: boolean;
   busy: boolean;
   liveUploadsEnabled: boolean;
   language: Intake["language"];
+  documentLanguage: Intake["documentLanguage"];
+  processingStage: ProcessingStage | null;
   error: string | null;
-  onFilesChange: (files: File[]) => void;
+  onDocumentLanguageChange: (language: Intake["documentLanguage"]) => void;
+  onFilesChange: (files: SelectedDocument[]) => void;
   onUseSample: () => void;
-  onConsentChange: (value: boolean) => void;
   onContinue: () => void;
   onBack: () => void;
 };
 
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+function formatBytes(bytes: number, locale: string) {
+  if (bytes < 1024) return `${bytes.toLocaleString(locale)} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024).toLocaleString(locale)} KB`;
+  return `${(bytes / (1024 * 1024)).toLocaleString(locale, {
+    maximumFractionDigits: 1,
+  })} MB`;
+}
+
+function readableFileType(file: File, fallback: string) {
+  if (file.type === "application/pdf") return "PDF";
+  if (file.type === "image/png") return "PNG";
+  if (file.type === "image/jpeg") return "JPG";
+  return fallback;
+}
+
+function historyItems(value: string) {
+  return value
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 export function AboutStep({
   draft,
   busy,
   sessionReady,
-  liveLanguagesEnabled,
+  speechInputEnabled,
   error,
   onDraftChange,
   onContinue,
+  onRetrySession,
 }: AboutStepProps) {
-  const update = <Key extends keyof IntakeDraft>(key: Key, value: IntakeDraft[Key]) => {
-    onDraftChange({ ...draft, [key]: value });
+  const copy = getMessages(draft.language);
+  const [historyEntry, setHistoryEntry] = useState("");
+  const [detailsAttempted, setDetailsAttempted] = useState(false);
+  const knownHistory = useMemo(() => historyItems(draft.medicalHistory), [draft.medicalHistory]);
+  const parsedAge = Number(draft.age);
+  const nameReady = draft.preferredName.trim().length > 0;
+  const ageReady =
+    Number.isInteger(parsedAge) &&
+    parsedAge >= 18 &&
+    parsedAge <= 120;
+  const detailsReady =
+    nameReady && ageReady;
+
+  const addHistory = () => {
+    const next = historyEntry.trim();
+    if (!next) return;
+    if (!knownHistory.some((item) => item.toLocaleLowerCase() === next.toLocaleLowerCase())) {
+      onDraftChange({ ...draft, medicalHistory: [...knownHistory, next].join("\n") });
+    }
+    setHistoryEntry("");
   };
-  const validContext =
-    draft.preferredName.trim().length > 0 &&
-    Number.isInteger(Number(draft.age)) &&
-    Number(draft.age) >= 18 &&
-    Number(draft.age) <= 120;
 
   return (
-    <main className="page-content page-content--about motion-enter">
-      <div className="page-kicker">About you</div>
-      <div className="page-heading">
-        <h1>A little about you</h1>
-        <p>
-          This context helps us explain the reports clearly. Your name stays separate from the
-          medical analysis.
-        </p>
-      </div>
+    <main className="vera-screen vera-screen--about motion-enter" id="main-content">
+      <ProgressStepper activeStep={1} language={draft.language} />
+
+      <fieldset className="language-field language-field--first">
+        <legend>{copy.languageLegend}</legend>
+        <div className="language-options">
+          {supportedLanguages.map((language) => (
+            <button
+              aria-pressed={draft.language === language}
+              className={draft.language === language ? "is-selected" : ""}
+              key={language}
+              lang={languageMeta[language].locale}
+              onClick={() => onDraftChange({
+                ...draft,
+                language,
+                documentLanguage: language,
+              })}
+              type="button"
+            >
+              {draft.language === language ? <Check aria-hidden="true" /> : null}
+              {languageMeta[language].nativeName}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      <header className="screen-heading">
+        <h1 tabIndex={-1}>{copy.aboutTitle}</h1>
+        <p>{copy.aboutBody}</p>
+      </header>
 
       <form
-        className="context-form context-form--standalone"
+        className="about-form"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          if (validContext && sessionReady && !busy) onContinue();
+          setDetailsAttempted(true);
+          if (detailsReady && sessionReady && !busy) onContinue();
         }}
       >
-        <div className="form-row form-row--identity">
+        <div className="person-fields">
           <label className="field">
-            <span>Preferred name</span>
+            <span>{copy.nameLabel}</span>
             <input
               autoComplete="name"
+              aria-describedby={detailsAttempted && !nameReady ? "name-error" : undefined}
+              aria-invalid={detailsAttempted && !nameReady}
               maxLength={80}
-              onChange={(event) => update("preferredName", event.target.value)}
-              placeholder="Enter your preferred name"
+              onChange={(event) => onDraftChange({ ...draft, preferredName: event.target.value })}
+              placeholder={copy.namePlaceholder}
               required
               value={draft.preferredName}
             />
+            {detailsAttempted && !nameReady ? (
+              <small className="field-error" id="name-error">{copy.nameRequired}</small>
+            ) : null}
           </label>
           <label className="field field--age">
-            <span>Age</span>
+            <span>{copy.ageLabel}</span>
             <input
+              aria-describedby={detailsAttempted && !ageReady ? "age-error" : undefined}
+              aria-invalid={detailsAttempted && !ageReady}
               inputMode="numeric"
-              max="120"
-              min="18"
-              onChange={(event) => update("age", event.target.value.replace(/[^0-9]/g, ""))}
-              placeholder="e.g., 34"
+              max={120}
+              min={18}
+              onChange={(event) => onDraftChange({ ...draft, age: event.target.value })}
+              placeholder={copy.agePlaceholder}
               required
+              type="number"
               value={draft.age}
             />
+            {detailsAttempted && !ageReady ? (
+              <small className="field-error" id="age-error">{copy.adultHelp}</small>
+            ) : null}
           </label>
         </div>
 
-        <fieldset className="language-field">
-          <legend>Preferred language</legend>
-          <div className="language-options">
-            {supportedLanguages.map((language) => {
-              const disabled = language !== "English" && !liveLanguagesEnabled;
-              return (
-                <button
-                  aria-pressed={draft.language === language}
-                  className={draft.language === language ? "is-selected" : ""}
-                  disabled={disabled}
-                  key={language}
-                  onClick={() => update("language", language)}
-                  title={disabled ? "Available when live providers are configured" : undefined}
-                  type="button"
-                >
-                  {languageLabels[language]}
-                </button>
-              );
-            })}
-          </div>
-          <small>
-            {liveLanguagesEnabled
-              ? "Live explanations and answers use your selected language."
-              : "The safe sample is available in English."}
-          </small>
-        </fieldset>
-
-        <label className="field field--textarea">
-          <span>Current symptoms <em>(optional)</em></span>
-          <span className="field__control">
+        <label className="field symptom-field">
+          <span className="field__split-label">
+            <span>{copy.symptomsLabel}</span>
+            <small>{copy.optional}</small>
+          </span>
+          <span className="symptom-box">
             <textarea
               maxLength={1_000}
-              onChange={(event) => update("symptoms", event.target.value)}
-              placeholder="Describe any current symptoms"
+              onChange={(event) => onDraftChange({ ...draft, symptoms: event.target.value })}
+              placeholder={copy.symptomsPlaceholder}
               rows={3}
               value={draft.symptoms}
             />
-            <button
-              aria-label="Voice input is not configured yet"
-              className="field__mic"
-              disabled
-              title="Voice input follows after the text workflow is verified"
-              type="button"
-            >
-              <Mic aria-hidden="true" />
-            </button>
+            <span className="symptom-box__voice">
+              <VoiceInputButton
+                disabled={busy}
+                enabled={speechInputEnabled}
+                language={draft.language}
+                onTranscript={(transcript) => onDraftChange({ ...draft, symptoms: transcript })}
+                variant="inline"
+              />
+            </span>
           </span>
-          <small>{draft.symptoms.length} / 1,000</small>
         </label>
 
-        <label className="field field--textarea">
-          <span>Known medical history <em>(optional)</em></span>
-          <span className="field__control">
-            <textarea
-              maxLength={1_000}
-              onChange={(event) => update("medicalHistory", event.target.value)}
-              placeholder="Share past conditions, surgeries, or ongoing care"
-              rows={3}
-              value={draft.medicalHistory}
+        <div className="history-field">
+          <span className="field-label">{copy.historyLabel}</span>
+          {knownHistory.length > 0 ? (
+            <div className="history-chips">
+              {knownHistory.map((item) => (
+                <span className="history-chip" key={item}>
+                  {item}
+                  <button
+                    aria-label={message(draft.language, "removeHistory", { item })}
+                    onClick={() =>
+                      onDraftChange({
+                        ...draft,
+                        medicalHistory: knownHistory.filter((entry) => entry !== item).join("\n"),
+                      })
+                    }
+                    type="button"
+                  >
+                    <X aria-hidden="true" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <div className="history-add">
+            <input
+              aria-label={copy.historyPlaceholder}
+              maxLength={120}
+              onChange={(event) => setHistoryEntry(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addHistory();
+                }
+              }}
+              placeholder={copy.historyPlaceholder}
+              value={historyEntry}
             />
-            <button
-              aria-label="Voice input is not configured yet"
-              className="field__mic"
-              disabled
-              title="Voice input follows after the text workflow is verified"
-              type="button"
-            >
-              <Mic aria-hidden="true" />
+            <button disabled={!historyEntry.trim()} onClick={addHistory} type="button">
+              <Plus aria-hidden="true" /> {copy.add}
             </button>
-          </span>
-          <small>{draft.medicalHistory.length} / 1,000</small>
-        </label>
-
-        {error ? <div className="inline-alert" role="alert">{error}</div> : null}
-
-        <div className="bottom-action bottom-action--focused">
-          <div className="bottom-action__note">
-            <span className="privacy-icon"><ShieldCheck aria-hidden="true" /></span>
-            <span>For adults 18 and older in this MVP.</span>
           </div>
+        </div>
+
+        {error ? (
+          <div className="inline-alert" role="alert">
+            <span>{error}</span>
+            <button className="text-button" onClick={onRetrySession} type="button">
+              {copy.retry}
+            </button>
+          </div>
+        ) : null}
+
+        <div className="screen-actions">
           <button
             className="button button--primary button--wide"
-            disabled={!validContext || busy || !sessionReady}
+            disabled={busy || !sessionReady}
             type="submit"
           >
-            Continue to documents
-            <ArrowRight aria-hidden="true" />
+            {sessionReady ? copy.continueDocuments : copy.sessionStarting}
+            {!sessionReady ? <LoaderCircle className="spinner" aria-hidden="true" /> : null}
           </button>
+          <p>{copy.medicalBoundaryShort}</p>
         </div>
       </form>
     </main>
   );
 }
 
+function ProcessingPanel({
+  language,
+  stage,
+}: {
+  language: Intake["language"];
+  stage: ProcessingStage;
+}) {
+  const copy = getMessages(language);
+  const stages: Array<{ id: ProcessingStage; label: string }> = [
+    { id: "uploading", label: copy.stageUploading },
+    { id: "reading", label: copy.stageReading },
+    { id: "writing", label: copy.stageWriting },
+  ];
+  const activeIndex = stages.findIndex((item) => item.id === stage);
+
+  return (
+    <section className="processing-panel" aria-live="polite" aria-busy="true">
+      <span className="processing-panel__pulse"><LoaderCircle aria-hidden="true" /></span>
+      <div>
+        <h2>{copy.processingTitle}</h2>
+        <p>{copy.processingHint}</p>
+        <ol>
+          {stages.map((item, index) => (
+            <li
+              className={index === activeIndex ? "is-active" : index < activeIndex ? "is-complete" : ""}
+              key={item.id}
+            >
+              {index < activeIndex ? <CheckCircle2 aria-hidden="true" /> : <span aria-hidden="true">{index + 1}</span>}
+              {item.label}
+            </li>
+          ))}
+        </ol>
+      </div>
+    </section>
+  );
+}
+
 export function DocumentsStep({
   files,
   useSample,
-  consented,
   busy,
   liveUploadsEnabled,
   language,
+  documentLanguage,
+  processingStage,
   error,
+  onDocumentLanguageChange,
   onFilesChange,
   onUseSample,
-  onConsentChange,
   onContinue,
   onBack,
 }: DocumentsStepProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const copy = getMessages(language);
+  const reportInputRef = useRef<HTMLInputElement>(null);
+  const currentPrescriptionInputRef = useRef<HTMLInputElement>(null);
+  const pastPrescriptionInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
 
-  const addFiles = (incoming: File[]) => {
-    if (!liveUploadsEnabled) return;
-    const supported = incoming.filter((file) =>
-      ["application/pdf", "image/jpeg", "image/png"].includes(file.type) &&
-      file.size > 0 &&
-      file.size <= 10 * 1024 * 1024,
+  const addFiles = (incoming: File[], category: DocumentCategory) => {
+    if (!liveUploadsEnabled || busy) return;
+    const supported = incoming.filter(
+      (file) =>
+        ["application/pdf", "image/jpeg", "image/png"].includes(file.type) &&
+        file.size > 0 &&
+        file.size <= 10 * 1024 * 1024,
     );
-    if (supported.length !== incoming.length) {
-      setFileError("Use only PDF, JPG, or PNG files up to 10 MB each.");
-    } else {
-      setFileError(null);
-    }
-    if (files.length + supported.length > 10) {
-      setFileError("You can add at most 10 files to one case.");
-    }
-    onFilesChange([...files, ...supported].slice(0, 10));
+    setFileError(supported.length === incoming.length ? null : copy.invalidFile);
+    if (files.length + supported.length > 10) setFileError(copy.tooManyFiles);
+    const additions = supported.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      category,
+    }));
+    onFilesChange([...files, ...additions].slice(0, 10));
   };
-  const sampleAvailable = language === "English";
-  const validDocuments = consented && ((sampleAvailable && useSample) || files.length > 0);
+
+  const reports = files.filter((item) => item.category === "report");
+  const currentPrescriptions = files.filter((item) => item.category === "current-prescription");
+  const pastPrescriptions = files.filter((item) => item.category === "past-prescription");
+  const documentCount = useSample ? 3 : files.length;
+  const validDocuments = useSample || files.length > 0;
+
+  const fileRow = (item: SelectedDocument) => (
+    <div className="file-row" key={item.id}>
+      <span className="file-row__preview"><FileText aria-hidden="true" /></span>
+      <div>
+        <strong>{item.file.name}</strong>
+        <span>
+          {readableFileType(item.file, copy.unknownFile)} · {formatBytes(item.file.size, languageMeta[language].locale)}
+        </span>
+      </div>
+      <button
+        aria-label={message(language, "removeFile", { name: item.file.name })}
+        className="icon-button"
+        onClick={() => onFilesChange(files.filter((candidate) => candidate.id !== item.id))}
+        type="button"
+      >
+        <X aria-hidden="true" />
+      </button>
+    </div>
+  );
 
   return (
-    <main className="page-content page-content--documents motion-enter">
-      <div className="page-kicker">Your documents</div>
-      <div className="page-heading">
-        <h1>Add your reports</h1>
-        <p>
-          Add up to ten de-identified PDFs or clear photos. Vera will read and check the details,
-          then explain them in simple language.
-        </p>
-      </div>
+    <main className="vera-screen vera-screen--documents motion-enter" id="main-content">
+      <ProgressStepper activeStep={2} language={language} />
 
-      <section className="upload-section upload-section--standalone" aria-labelledby="upload-heading">
-        <div className="section-heading">
-          <h2 id="upload-heading">Medical reports and prescriptions</h2>
-          <p>PDF, JPG or PNG · up to 10 files · 10 MB each</p>
-        </div>
+      <header className="screen-heading">
+        <button className="back-link" disabled={busy} onClick={onBack} type="button">
+          <ArrowLeft aria-hidden="true" /> {copy.back}
+        </button>
+        <h1 tabIndex={-1}>{copy.documentsTitle}</h1>
+        <p>{copy.documentsBody}</p>
+      </header>
 
-        <div className={`mode-notice ${liveUploadsEnabled ? "mode-notice--ready" : ""}`}>
-            <ShieldCheck aria-hidden="true" />
-            <div>
-              <strong>{liveUploadsEnabled ? "Live analysis is ready" : "Safe sample mode"}</strong>
-              <span>
-                {liveUploadsEnabled
-                  ? "Uploads are digitised by Sarvam, then checked and explained with OpenAI."
-                  : "Live document analysis stays locked until approved provider keys are configured."}
-              </span>
-            </div>
-        </div>
-
-        <div
-          aria-disabled={!liveUploadsEnabled}
-          className={`drop-zone ${dragging ? "is-dragging" : ""} ${!liveUploadsEnabled ? "is-disabled" : ""}`}
-          onDragEnter={(event) => {
-            event.preventDefault();
-            if (liveUploadsEnabled) setDragging(true);
-          }}
-          onDragLeave={(event) => {
-            event.preventDefault();
-            setDragging(false);
-          }}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            setDragging(false);
-            addFiles(Array.from(event.dataTransfer.files));
-          }}
-        >
-          <Upload aria-hidden="true" className="drop-zone__icon" />
-          <strong>{liveUploadsEnabled ? "Drag and drop files here" : "Live uploads are not active yet"}</strong>
-          <span>{liveUploadsEnabled ? "or" : "Use the synthetic case below for the full flow"}</span>
-          <button
-            className="button button--secondary"
-            disabled={!liveUploadsEnabled}
-            onClick={() => inputRef.current?.click()}
-            type="button"
-          >
-            Choose files
-          </button>
-          <input
-            accept="application/pdf,image/jpeg,image/png"
-            hidden
-            multiple
-            onChange={(event) => addFiles(Array.from(event.target.files ?? []))}
-            ref={inputRef}
-            type="file"
-          />
-        </div>
-
-        <div className="file-list" aria-live="polite">
-          {sampleAvailable && useSample ? (
-            <div className="file-row file-row--sample">
-              <FileText aria-hidden="true" />
+      {busy && processingStage ? (
+        <ProcessingPanel language={language} stage={processingStage} />
+      ) : (
+        <div className="documents-form">
+          <section className="document-section" aria-labelledby="reports-heading">
+            <div className="document-section__heading">
               <div>
-                <strong>Safe sample reports</strong>
-                <span>2 blood reports + 1 prescription · synthetic data</span>
+                <h2 id="reports-heading">{copy.medicalReports}</h2>
+                <span>{message(language, "fileCount", { count: useSample ? 2 : reports.length })}</span>
               </div>
-              <span className="file-row__status"><CheckCircle2 aria-hidden="true" /> Ready</span>
+              <label className="report-language-compact">
+                <span>{copy.reportLanguageShort}</span>
+                <select
+                  onChange={(event) =>
+                    onDocumentLanguageChange(event.target.value as Intake["documentLanguage"])
+                  }
+                  value={documentLanguage}
+                >
+                  {supportedLanguages.map((option) => (
+                    <option key={option} lang={languageMeta[option].locale} value={option}>
+                      {languageMeta[option].nativeName}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
-          ) : null}
-          {files.map((file, index) => (
-            <div className="file-row" key={`${file.name}-${file.lastModified}-${index}`}>
-              <FileText aria-hidden="true" />
-              <div>
-                <strong>{file.name}</strong>
-                <span>{file.type || "Unknown type"} · {formatBytes(file.size)}</span>
-              </div>
-              <button
-                aria-label={`Remove ${file.name}`}
-                className="icon-button"
-                onClick={() => onFilesChange(files.filter((_, fileIndex) => fileIndex !== index))}
-                type="button"
-              >
-                <X aria-hidden="true" />
-              </button>
+
+            <div className="file-list" aria-live="polite">
+              {useSample ? (
+                <div className="file-row file-row--sample">
+                  <span className="file-row__preview"><FileText aria-hidden="true" /></span>
+                  <div>
+                    <strong>{copy.sampleReportTitle}</strong>
+                    <span>{copy.sampleReportDetail}</span>
+                  </div>
+                  <CheckCircle2 aria-label={copy.ready} className="file-row__ready" />
+                </div>
+              ) : reports.map(fileRow)}
             </div>
-          ))}
+
+            <button
+              className={`add-document ${dragging ? "is-dragging" : ""}`}
+              disabled={!liveUploadsEnabled || busy}
+              onClick={() => reportInputRef.current?.click()}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                if (liveUploadsEnabled) setDragging(true);
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                setDragging(false);
+              }}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragging(false);
+                addFiles(Array.from(event.dataTransfer.files), "report");
+              }}
+              type="button"
+            >
+              <Upload aria-hidden="true" />
+              <span>{copy.addReport}</span>
+            </button>
+            <input
+              accept="application/pdf,image/jpeg,image/png"
+              hidden
+              multiple
+              onChange={(event) => addFiles(Array.from(event.target.files ?? []), "report")}
+              ref={reportInputRef}
+              type="file"
+            />
+          </section>
+
+          <section className="document-section" aria-labelledby="prescriptions-heading">
+            <div className="document-section__heading">
+              <div><h2 id="prescriptions-heading">{copy.prescriptions}</h2></div>
+            </div>
+            <div className="prescription-grid">
+              <article className="prescription-upload prescription-upload--current">
+                <strong>{copy.currentPrescription}</strong>
+                {useSample ? (
+                  <span>{copy.samplePrescriptionTitle}<small>{copy.oneFile}</small></span>
+                ) : currentPrescriptions.length > 0 ? (
+                  <div className="prescription-upload__files">{currentPrescriptions.map(fileRow)}</div>
+                ) : <small>{copy.noFileAdded}</small>}
+                <button
+                  disabled={!liveUploadsEnabled || busy}
+                  onClick={() => currentPrescriptionInputRef.current?.click()}
+                  type="button"
+                >
+                  <Plus aria-hidden="true" /> {copy.add}
+                </button>
+              </article>
+              <article className="prescription-upload prescription-upload--past">
+                <strong>{copy.pastPrescription}</strong>
+                {pastPrescriptions.length > 0 ? (
+                  <div className="prescription-upload__files">{pastPrescriptions.map(fileRow)}</div>
+                ) : <small>{copy.pastPrescriptionHelp}</small>}
+                <button
+                  disabled={!liveUploadsEnabled || busy}
+                  onClick={() => pastPrescriptionInputRef.current?.click()}
+                  type="button"
+                >
+                  <Plus aria-hidden="true" /> {copy.add}
+                </button>
+              </article>
+            </div>
+            <input
+              accept="application/pdf,image/jpeg,image/png"
+              hidden
+              multiple
+              onChange={(event) => addFiles(Array.from(event.target.files ?? []), "current-prescription")}
+              ref={currentPrescriptionInputRef}
+              type="file"
+            />
+            <input
+              accept="application/pdf,image/jpeg,image/png"
+              hidden
+              multiple
+              onChange={(event) => addFiles(Array.from(event.target.files ?? []), "past-prescription")}
+              ref={pastPrescriptionInputRef}
+              type="file"
+            />
+          </section>
+
+          <div className="document-note">{copy.deleteAnyTime}</div>
+
+          {!useSample ? (
+            <button className="sample-link" onClick={onUseSample} type="button">
+              {copy.useSample}
+            </button>
+          ) : (
+            <span className="sample-active"><Check aria-hidden="true" /> {copy.sampleActive}</span>
+          )}
+
+          {!liveUploadsEnabled ? <p className="upload-unavailable">{copy.uploadUnavailable}</p> : null}
+          {fileError ? <div className="inline-alert" role="alert">{fileError}</div> : null}
         </div>
-
-        {fileError ? <div className="inline-alert" role="alert">{fileError}</div> : null}
-
-        {sampleAvailable && !useSample ? (
-          <button className="text-button" onClick={onUseSample} type="button">
-            Use the safe sample reports instead
-          </button>
-        ) : null}
-
-        <label className="consent-row">
-          <input
-            checked={consented}
-            onChange={(event) => onConsentChange(event.target.checked)}
-            type="checkbox"
-          />
-          <span>
-            {sampleAvailable && useSample
-              ? "I confirm that I am using the synthetic sample for this buildathon MVP."
-              : "I confirm these files are synthetic or de-identified, and I consent to temporary private storage and processing by Vera’s configured providers for this MVP."}
-          </span>
-        </label>
-      </section>
+      )}
 
       {error ? <div className="inline-alert" role="alert">{error}</div> : null}
 
-      <div className="bottom-action bottom-action--focused">
-        <button className="button button--back" disabled={busy} onClick={onBack} type="button">
-          <ArrowLeft aria-hidden="true" /> Back
-        </button>
+      <div className="screen-actions screen-actions--documents">
         <button
           className="button button--primary button--wide"
           disabled={!validDocuments || busy}
           onClick={onContinue}
           type="button"
         >
-          {busy ? "Reading and explaining your reports…" : "Explain my reports"}
-          {!busy ? <ArrowRight aria-hidden="true" /> : <span className="spinner" aria-hidden="true" />}
+          {busy
+            ? copy.processingTitle
+            : message(language, "analyseDocuments", {
+                count: documentCount.toLocaleString(languageMeta[language].locale),
+              })}
+          {busy ? <LoaderCircle className="spinner" aria-hidden="true" /> : null}
         </button>
       </div>
     </main>

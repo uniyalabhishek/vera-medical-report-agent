@@ -50,14 +50,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     try {
       const provider = getProvider(mode);
-      const documents = await Promise.all(uploads.map(async (upload) => ({
+      const documents = await Promise.all(uploads.map(async (upload, index) => ({
         id: upload.id,
-        name: upload.displayName,
+        name: `report-${index + 1}.${upload.mimeType === "application/pdf" ? "pdf" : upload.mimeType === "image/png" ? "png" : "jpg"}`,
         mimeType: upload.mimeType,
         sizeBytes: upload.sizeBytes,
+        category: upload.category,
         data: await getStoredUploadData(caseId, upload.storedName),
       })));
-      const facts = FactsSchema.parse(
+      const providerFacts = FactsSchema.parse(
         await provider.extract({
           caseId,
           intake: caseView.intake,
@@ -65,6 +66,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
           documents,
         }),
       );
+      const displayNames = new Map(uploads.map((upload) => [upload.id, upload.displayName]));
+      const facts = providerFacts.map((fact) => ({
+        ...fact,
+        source: {
+          ...fact.source,
+          documentName: displayNames.get(fact.source.documentId) ?? fact.source.documentName,
+        },
+      }));
       const updated = await setCaseFacts(caseId, session.tokenHash, facts, "NEEDS_REVIEW");
       return privateJson({ case: updated });
     } catch (error) {

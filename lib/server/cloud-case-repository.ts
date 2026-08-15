@@ -1,7 +1,8 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
-import type { Analysis, CaseState, CaseView, Fact, Intake, QuestionResponse } from "@/lib/contracts";
+import type { Analysis, CaseState, CaseView, DocumentCategory, Fact, Intake, QuestionResponse } from "@/lib/contracts";
+import { DocumentCategorySchema, IntakeSchema } from "@/lib/contracts";
 import { ApiError } from "@/lib/server/api-error";
 import { ensureCloudSchema, getCloudSql } from "@/lib/server/neon";
 
@@ -27,15 +28,21 @@ export type CloudUploadRecord = {
   mimeType: string;
   sizeBytes: number;
   sourceMode: "uploaded" | "demo";
+  category: DocumentCategory;
 };
 
 function toView(row: CloudCaseRow): CaseView {
+  const parsedIntake = IntakeSchema.parse({
+    ...JSON.parse(row.intake_json) as Record<string, unknown>,
+    preferredName: row.preferred_name,
+  });
+  const { preferredName, ...intake } = parsedIntake;
   return {
     id: row.id,
     state: row.state,
     providerMode: row.provider_mode,
-    intake: JSON.parse(row.intake_json) as Omit<Intake, "preferredName">,
-    preferredName: row.preferred_name,
+    intake,
+    preferredName,
     facts: JSON.parse(row.facts_json) as Fact[],
     analysis: row.analysis_json ? JSON.parse(row.analysis_json) as Analysis : null,
     createdAt: new Date(Number(row.created_at)).toISOString(),
@@ -156,34 +163,53 @@ export async function addUpload(
   caseId: string,
   sessionHash: string,
   upload: Omit<CloudUploadRecord, "caseId">,
+  complete = true,
 ) {
   await ensureCloudSchema();
   const now = Date.now();
   const rows = await getCloudSql().query(
     `WITH inserted AS (
        INSERT INTO uploads
-         (id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode, created_at)
-       SELECT $1, c.id, $4, $5, $6, $7, $8, $9
+         (id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode, category, created_at)
+       SELECT $1, c.id, $4, $5, $6, $7, $8, $9, $10
        FROM cases c
-       WHERE c.id = $2 AND c.session_hash = $3 AND c.state != 'DELETED' AND c.expires_at > $9
+       WHERE c.id = $2 AND c.session_hash = $3 AND c.state = 'DRAFT' AND c.expires_at > $10
          AND (SELECT COUNT(*) FROM uploads u WHERE u.case_id = c.id) < 10
        RETURNING case_id
      )
-     UPDATE cases SET state = 'UPLOADED', updated_at = $9
+     UPDATE cases SET state = CASE WHEN $11 THEN 'UPLOADED' ELSE state END, updated_at = $10
      WHERE id IN (SELECT case_id FROM inserted)
      RETURNING id`,
     [upload.id, caseId, sessionHash, upload.displayName, upload.storedName, upload.mimeType,
-      upload.sizeBytes, upload.sourceMode, now],
+      upload.sizeBytes, upload.sourceMode, upload.category, now, complete],
   ) as Array<{ id: string }>;
   if (!rows[0]) {
     throw new ApiError(409, "UPLOAD_NOT_RECORDED", "The case is unavailable or already has 10 files.");
   }
 }
 
+export async function removeUploads(
+  caseId: string,
+  sessionHash: string,
+  uploadIds: string[],
+) {
+  if (uploadIds.length === 0) return;
+  await ensureCloudSchema();
+  await getCloudSql().query(
+    `DELETE FROM uploads
+     WHERE case_id = $1 AND id = ANY($2::text[])
+       AND EXISTS (
+         SELECT 1 FROM cases c
+         WHERE c.id = $1 AND c.session_hash = $3 AND c.state = 'DRAFT' AND c.expires_at > $4
+       )`,
+    [caseId, uploadIds, sessionHash, Date.now()],
+  );
+}
+
 export async function listUploads(caseId: string, sessionHash: string): Promise<CloudUploadRecord[]> {
   await getOwnedCase(caseId, sessionHash);
   const rows = await getCloudSql().query(
-    `SELECT id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode
+    `SELECT id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode, category
      FROM uploads WHERE case_id = $1 ORDER BY created_at ASC`,
     [caseId],
   ) as Array<{
@@ -194,6 +220,7 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
     mime_type: string;
     size_bytes: string | number;
     source_mode: "uploaded" | "demo";
+    category: string;
   }>;
   return rows.map((row) => ({
     id: row.id,
@@ -203,6 +230,7 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
     mimeType: row.mime_type,
     sizeBytes: Number(row.size_bytes),
     sourceMode: row.source_mode,
+    category: DocumentCategorySchema.parse(row.category),
   }));
 }
 

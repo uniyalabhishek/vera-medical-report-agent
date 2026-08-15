@@ -1,27 +1,25 @@
-const steps = ["About you", "Your documents", "Your summary", "Follow-up questions"] as const;
+import type { Intake } from "@/lib/contracts";
+import { getMessages } from "@/lib/i18n";
 
-export function ProgressStepper({ activeStep }: { activeStep: 1 | 2 | 3 | 4 }) {
+export function ProgressStepper({
+  activeStep,
+  language,
+}: {
+  activeStep: 1 | 2 | 3 | 4;
+  language: Intake["language"];
+}) {
+  const copy = getMessages(language);
+  const steps = [copy.stepAbout, copy.stepDocuments, copy.stepSummary, copy.stepQuestions];
   return (
-    <nav className="stepper" aria-label="Analysis progress">
-      <span className="stepper__mobile-status">
-        Step {activeStep} of {steps.length} · {steps[activeStep - 1]}
-      </span>
+    <nav className="progress-bars" aria-label={copy.progressAria}>
       {steps.map((step, index) => {
         const number = index + 1;
-        const complete = number < activeStep;
-        const active = number === activeStep;
         return (
-          <div
-            className={`stepper__item ${complete ? "is-complete" : ""} ${active ? "is-active" : ""}`}
+          <span
+            className={number <= activeStep ? "is-filled" : ""}
             key={step}
-            aria-current={active ? "step" : undefined}
-          >
-            <div className="stepper__rail" aria-hidden="true">
-              <span className="stepper__number">{number}</span>
-              {number < steps.length ? <span className="stepper__line" /> : null}
-            </div>
-            <span className="stepper__label">{step}</span>
-          </div>
+            aria-current={number === activeStep ? "step" : undefined}
+          ><span className="sr-only">{step}</span></span>
         );
       })}
     </nav>

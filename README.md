@@ -1,6 +1,6 @@
 # Vera
 
-Vera is a mobile-first medical report explainer for synthetic or de-identified files. It extracts source-linked facts, requires user confirmation, creates a five-part explanation, and answers questions from confirmed facts only.
+Vera is a mobile-first medical report explainer for synthetic or de-identified files. It checks source-linked facts internally, creates a five-part summary and one calm physiology picture, and answers questions from those facts only.
 
 It does not diagnose, recommend treatment, or tell a user to change medicine.
 
@@ -39,6 +39,7 @@ The smoke test uses only [the synthetic fixture](./fixtures/synthetic-medical-re
 - Synthetic or fully de-identified files only.
 - PDF, JPG, and PNG; up to 10 files and 10 MB each.
 - No DICOM or medical-image interpretation.
+- Generated pictures explain one blood marker; they are not scans, diagnoses, or pictures of the user's body.
 - No live web research, diagnosis, treatment, or medication changes.
 - Case access expires after 24 hours; “Start over” deletes the case and stored files immediately.
 - Automated physical deletion is opportunistic in this MVP, so identified patient data is out of scope.
@@ -54,4 +55,4 @@ Then add `OPENAI_API_KEY`, `SARVAM_API_KEY`, and `MVP_ACCESS_CODE` as encrypted 
 
 The browser uploads directly to the private Blob store with a short-lived, case-scoped token. Vera validates the real file bytes before recording the upload. Use only synthetic or fully de-identified files for this MVP.
 
-See the [final architecture](./docs/medical-report-explainer-final-architecture.md) and the [detailed research reference](./docs/medical-report-explainer-architecture.md).
+For continued work, read the [agent handoff](./docs/AGENT_HANDOFF.md), then the [final MVP architecture](./docs/medical-report-explainer-final-architecture.md). The [detailed research reference](./docs/medical-report-explainer-architecture.md) records the broader production analysis and sources.

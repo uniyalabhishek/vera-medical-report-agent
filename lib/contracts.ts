@@ -8,10 +8,19 @@ export const supportedLanguages = [
   "Marathi",
 ] as const;
 
+export const documentCategories = [
+  "report",
+  "current-prescription",
+  "past-prescription",
+] as const;
+export const DocumentCategorySchema = z.enum(documentCategories);
+export type DocumentCategory = z.infer<typeof DocumentCategorySchema>;
+
 export const IntakeSchema = z.object({
-  preferredName: z.string().trim().min(1).max(80),
-  age: z.coerce.number().int().min(18).max(120),
+  preferredName: z.string().trim().max(80).default(""),
+  age: z.coerce.number().int().min(18).max(120).default(18),
   language: z.enum(supportedLanguages),
+  documentLanguage: z.enum(supportedLanguages).default("English"),
   symptoms: z.string().trim().max(1_000).default(""),
   medicalHistory: z.string().trim().max(1_000).default(""),
 });
@@ -25,6 +34,7 @@ export const SourceSpanSchema = z.object({
   page: z.number().int().positive(),
   excerpt: z.string(),
   bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+  documentCategory: DocumentCategorySchema.default("report"),
 });
 
 export type SourceSpan = z.infer<typeof SourceSpanSchema>;
@@ -36,12 +46,31 @@ const BaseFactSchema = z.object({
   needsReview: z.boolean(),
 });
 
+export const ParsedMedicalRangeSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("closed"),
+    lower: z.number().finite(),
+    upper: z.number().finite(),
+  }),
+  z.object({
+    kind: z.literal("upper-bound"),
+    bound: z.number().finite(),
+    inclusive: z.boolean(),
+  }),
+  z.object({
+    kind: z.literal("lower-bound"),
+    bound: z.number().finite(),
+    inclusive: z.boolean(),
+  }),
+]);
+
 export const ObservationFactSchema = BaseFactSchema.extend({
   kind: z.literal("observation"),
   name: z.string(),
   value: z.string(),
   unit: z.string(),
   referenceRange: z.string(),
+  numericRange: ParsedMedicalRangeSchema.nullable().default(null),
   flag: z.enum(["high", "low", "normal", "not_provided"]),
   effectiveDate: z.string(),
 });

@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { demoProvider } from "@/lib/model/demo-provider";
 
 const intake = {
-  age: 42,
+  age: 18,
   language: "English" as const,
+  documentLanguage: "English" as const,
   symptoms: "",
   medicalHistory: "",
 };
@@ -13,8 +14,11 @@ describe("DemoMedicalReportProvider", () => {
     const facts = await demoProvider.extract({ caseId: "case", intake, mode: "demo", documents: [] });
 
     expect(facts).toHaveLength(4);
-    expect(facts.every((fact) => fact.confirmed === false)).toBe(true);
+    expect(facts.every((fact) => fact.confirmed && !fact.needsReview)).toBe(true);
     expect(facts.every((fact) => fact.source.page > 0 && fact.source.excerpt.length > 0)).toBe(true);
+    expect(facts.find((fact) => fact.id === "fact_hba1c_current")).toMatchObject({
+      numericRange: { kind: "closed", lower: 4, upper: 5.6 },
+    });
   });
 
   it("does not pretend to extract an uploaded document", async () => {
@@ -23,18 +27,21 @@ describe("DemoMedicalReportProvider", () => {
     ).rejects.toMatchObject({ code: "PROVIDER_CONFIGURATION_REQUIRED" });
   });
 
-  it("blocks synthesis until every fact is confirmed", async () => {
+  it("blocks synthesis when a fact is not accepted by the server", async () => {
     const facts = await demoProvider.extract({ caseId: "case", intake, mode: "demo", documents: [] });
 
     await expect(
-      demoProvider.synthesize({ caseId: "case", intake, facts }),
-    ).rejects.toThrow("confirmed");
+      demoProvider.synthesize({
+        caseId: "case",
+        intake,
+        facts: facts.map((fact, index) => index === 0 ? { ...fact, needsReview: true } : fact),
+      }),
+    ).rejects.toThrow("accepted");
   });
 
   it("creates exactly five source-linked explanation sections", async () => {
     const extracted = await demoProvider.extract({ caseId: "case", intake, mode: "demo", documents: [] });
-    const facts = extracted.map((fact) => ({ ...fact, confirmed: true }));
-    const analysis = await demoProvider.synthesize({ caseId: "case", intake, facts });
+    const analysis = await demoProvider.synthesize({ caseId: "case", intake, facts: extracted });
 
     expect(analysis.cards.map((card) => card.id)).toEqual([
       "documents",
@@ -52,7 +59,7 @@ describe("DemoMedicalReportProvider", () => {
 
   it("refuses medication-change questions and repeats only the source instruction", async () => {
     const extracted = await demoProvider.extract({ caseId: "case", intake, mode: "demo", documents: [] });
-    const facts = extracted.map((fact) => ({ ...fact, confirmed: true }));
+    const facts = extracted;
     const analysis = await demoProvider.synthesize({ caseId: "case", intake, facts });
     const answer = await demoProvider.answer({
       caseId: "case",
@@ -69,7 +76,7 @@ describe("DemoMedicalReportProvider", () => {
 
   it("answers a haemoglobin question from the haemoglobin fact", async () => {
     const extracted = await demoProvider.extract({ caseId: "case", intake, mode: "demo", documents: [] });
-    const facts = extracted.map((fact) => ({ ...fact, confirmed: true }));
+    const facts = extracted;
     const analysis = await demoProvider.synthesize({ caseId: "case", intake, facts });
     const answer = await demoProvider.answer({
       caseId: "case",
@@ -84,4 +91,27 @@ describe("DemoMedicalReportProvider", () => {
     expect(answer.answer).not.toContain("HbA1c");
     expect(answer.citations).toHaveLength(1);
   });
+
+  it.each(["Hindi", "Tamil", "Kannada", "Marathi"] as const)(
+    "localizes the complete sample explanation in %s while preserving values",
+    async (language) => {
+      const localizedIntake = { ...intake, language };
+      const facts = await demoProvider.extract({
+        caseId: "case",
+        intake: localizedIntake,
+        mode: "demo",
+        documents: [],
+      });
+      const analysis = await demoProvider.synthesize({
+        caseId: "case",
+        intake: localizedIntake,
+        facts,
+      });
+
+      expect(analysis.cards).toHaveLength(5);
+      expect(analysis.cards[0].title).not.toBe("1. What these files contain");
+      expect(analysis.cards[1].body).toContain("7.2%");
+      expect(analysis.cards[1].body).toContain("11.4 g/dL");
+    },
+  );
 });

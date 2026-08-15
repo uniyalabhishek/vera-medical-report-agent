@@ -5,10 +5,12 @@ import type {
   Analysis,
   CaseState,
   CaseView,
+  DocumentCategory,
   Fact,
   Intake,
   QuestionResponse,
 } from "@/lib/contracts";
+import { DocumentCategorySchema, IntakeSchema } from "@/lib/contracts";
 import { db } from "@/lib/server/db";
 import { ApiError } from "@/lib/server/api-error";
 import * as cloud from "@/lib/server/cloud-case-repository";
@@ -36,15 +38,21 @@ export type UploadRecord = {
   mimeType: string;
   sizeBytes: number;
   sourceMode: "uploaded" | "demo";
+  category: DocumentCategory;
 };
 
 function toView(row: CaseRow): CaseView {
+  const parsedIntake = IntakeSchema.parse({
+    ...JSON.parse(row.intake_json) as Record<string, unknown>,
+    preferredName: row.preferred_name,
+  });
+  const { preferredName, ...intake } = parsedIntake;
   return {
     id: row.id,
     state: row.state,
     providerMode: row.provider_mode,
-    intake: JSON.parse(row.intake_json) as Omit<Intake, "preferredName">,
-    preferredName: row.preferred_name,
+    intake,
+    preferredName,
     facts: JSON.parse(row.facts_json) as Fact[],
     analysis: row.analysis_json ? (JSON.parse(row.analysis_json) as Analysis) : null,
     createdAt: new Date(row.created_at).toISOString(),
@@ -198,13 +206,17 @@ export async function addUpload(
   caseId: string,
   sessionHash: string,
   upload: Omit<UploadRecord, "caseId">,
+  complete = true,
 ) {
-  if (getStorageMode() === "cloud") return cloud.addUpload(caseId, sessionHash, upload);
-  await getOwnedCase(caseId, sessionHash);
+  if (getStorageMode() === "cloud") return cloud.addUpload(caseId, sessionHash, upload, complete);
+  const caseView = await getOwnedCase(caseId, sessionHash);
+  if (caseView.state !== "DRAFT") {
+    throw new ApiError(409, "UPLOADS_CLOSED", "Uploads are closed after report reading starts.");
+  }
   db.prepare(
     `INSERT INTO uploads
-      (id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode, category, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     upload.id,
     caseId,
@@ -213,9 +225,29 @@ export async function addUpload(
     upload.mimeType,
     upload.sizeBytes,
     upload.sourceMode,
+    upload.category,
     Date.now(),
   );
-  await markCaseState(caseId, sessionHash, "UPLOADED");
+  if (complete) await markCaseState(caseId, sessionHash, "UPLOADED");
+}
+
+export async function removeUploads(
+  caseId: string,
+  sessionHash: string,
+  uploadIds: string[],
+) {
+  if (uploadIds.length === 0) return;
+  if (getStorageMode() === "cloud") {
+    return cloud.removeUploads(caseId, sessionHash, uploadIds);
+  }
+  const caseView = await getOwnedCase(caseId, sessionHash);
+  if (caseView.state !== "DRAFT") {
+    throw new ApiError(409, "UPLOADS_CLOSED", "Uploads are closed after report reading starts.");
+  }
+  const placeholders = uploadIds.map(() => "?").join(", ");
+  db.prepare(
+    `DELETE FROM uploads WHERE case_id = ? AND id IN (${placeholders})`,
+  ).run(caseId, ...uploadIds);
 }
 
 export async function listUploads(caseId: string, sessionHash: string): Promise<UploadRecord[]> {
@@ -223,7 +255,7 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
   await getOwnedCase(caseId, sessionHash);
   const rows = db
     .prepare(
-      `SELECT id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode
+      `SELECT id, case_id, display_name, stored_name, mime_type, size_bytes, source_mode, category
        FROM uploads WHERE case_id = ? ORDER BY created_at ASC`,
     )
     .all(caseId) as Array<{
@@ -234,6 +266,7 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
     mime_type: string;
     size_bytes: number;
     source_mode: "uploaded" | "demo";
+    category: string;
   }>;
 
   return rows.map((row) => ({
@@ -244,6 +277,7 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     sourceMode: row.source_mode,
+    category: DocumentCategorySchema.parse(row.category),
   }));
 }
 

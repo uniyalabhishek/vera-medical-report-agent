@@ -52,6 +52,7 @@ function createDatabase() {
       mime_type TEXT NOT NULL,
       size_bytes INTEGER NOT NULL,
       source_mode TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'report',
       created_at INTEGER NOT NULL
     );
 
@@ -67,6 +68,11 @@ function createDatabase() {
     CREATE INDEX IF NOT EXISTS idx_uploads_case ON uploads(case_id);
     CREATE INDEX IF NOT EXISTS idx_turns_case ON conversation_turns(case_id);
   `);
+
+  const uploadColumns = database.prepare("PRAGMA table_info(uploads)").all() as Array<{ name: string }>;
+  if (!uploadColumns.some((column) => column.name === "category")) {
+    database.exec("ALTER TABLE uploads ADD COLUMN category TEXT NOT NULL DEFAULT 'report'");
+  }
 
   return database;
 }

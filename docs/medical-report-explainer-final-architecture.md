@@ -1,281 +1,194 @@
-# Medical Report Explainer: Final Architecture
+# Vera: Final MVP Architecture
 
-**Status:** Final buildathon decision  
-**Date:** 15 August 2026  
-**Detailed research:** [Model, safety, privacy, and architecture reference](./medical-report-explainer-architecture.md)
+**Status:** Authoritative implementation decision
 
-## 1. Product decision
+**Updated:** 16 August 2026
 
-Build a **medical report explainer**, not a diagnosis or treatment agent.
+**Operational handoff:** [AGENT_HANDOFF.md](./AGENT_HANDOFF.md)
 
-It will:
+**Deep research:** [medical-report-explainer-architecture.md](./medical-report-explainer-architecture.md)
 
-- extract facts from reports and prescriptions;
-- explain those facts in simple language;
-- compare compatible current and past results;
-- restate instructions written by the doctor;
-- cite the source page for every patient-specific statement;
-- help the user prepare questions for a doctor.
+## 1. Product boundary
 
-It will not:
+Vera is a mobile-first **medical report explainer** for adults using synthetic or fully de-identified documents.
 
-- diagnose, predict disease, or assess personal risk;
-- recommend, start, stop, or change medicines or tests;
-- invent prescription instructions;
-- infer genetic risk from nationality, language, surname, caste, or location;
-- interpret CT, MRI, X-ray, ultrasound, pathology, or other medical pixels;
-- search the live internet with patient information.
+Vera can:
 
-## 2. Final user flow
+- extract source-linked laboratory values and written prescription instructions;
+- explain the documents in the selected language;
+- compare compatible dated results;
+- show calm, deterministic range and trend visuals;
+- create one calm, text-free physiology illustration for a checked blood result;
+- answer questions from the extracted document facts.
 
-1. **About you** — age, preferred language, optional symptoms and history, consent, and optional voice input.
-2. **Upload** — up to ten PDFs or images, labelled as reports, current prescription, or past prescription.
-3. **Review extracted facts** — confirm patient, dates, values, units, ranges, medicine names, doses, frequency, and duration. Critical uncertainty blocks analysis.
-4. **Your report, explained** — five source-linked cards with calm, deterministic visuals.
-5. **Ask questions** — grounded text Q&A; add push-to-talk only after the text path is stable.
+Vera cannot:
 
-The five result cards are fixed:
+- diagnose, predict, triage, or assess personal risk;
+- recommend tests or treatment;
+- tell a user to start, stop, or change medicine;
+- infer a condition from age, symptoms, history, nationality, or genetics;
+- interpret DICOM, CT, MRI, X-ray, ultrasound, or pathology pixels;
+- search the live web with patient context.
 
-1. What these documents cover.
-2. Important findings written in the reports.
-3. What changed over time.
-4. Instructions written by the doctor.
-5. Questions for the next doctor visit.
+## 2. Shipped user flow
 
-## 3. Architecture
+1. **About you** — preferred name, age, language, optional symptoms, and optional history.
+2. **Your documents** — up to ten PDF, JPG, or PNG files, or the English synthetic sample.
+3. **Your summary** — five short checked points, range/trend visuals, an optional picture explanation, and written prescription restatement.
+4. **Follow-up questions** — grounded text or voice Q&A. Citations remain internal and are not shown in the simplified patient UI.
+
+There is no manual field-by-field confirmation screen. The product is for people with low medical and digital literacy; making them validate every extracted parameter transfers the system's job to the user.
+
+The code still uses `confirmed`, `NEEDS_REVIEW`, and `/confirmation` as internal workflow names. The live provider marks only facts that pass confidence, literal-source, field-window, and numeric checks as confirmed. The frontend then calls the internal confirmation route without changing those facts. This is a technical gate, not a claim that a person reviewed the facts. Rename it when the workflow is next refactored.
+
+## 3. Current request path
 
 ```mermaid
 flowchart LR
-    UI[Web app] --> EDGE[Trust edge]
-    EDGE --> FLOW[Case state machine]
-    FLOW --> FILES[Secure file pipeline]
-    FILES --> EXTRACT[Parse, OCR, structure]
-    EXTRACT --> REVIEW[User review]
-    REVIEW --> FACTS[Confirmed fact store]
-    FACTS --> SYNTH[Five-card synthesis]
-    EVIDENCE[Approved evidence corpus] --> SYNTH
-    SYNTH --> VERIFY[Rules and claim verifier]
-    VERIFY --> LOCALIZE[Translation and voice]
-    LOCALIZE --> RESULT[Results and grounded Q&A]
+    UI[Next.js UI] --> SESSION[Basic access gate + anonymous session + CSRF]
+    SESSION --> UPLOAD[Local private files or private Vercel Blob]
+    UPLOAD --> OCR[Sarvam document digitisation]
+    OCR --> EXTRACT[OpenAI structured extraction]
+    EXTRACT --> CHECKS[Exact-excerpt and deterministic numeric checks]
+    CHECKS --> ACCEPT[Internal auto-accept]
+    ACCEPT --> DRAFT[OpenAI five-card synthesis]
+    DRAFT --> VERIFY[Fresh OpenAI safety-verifier call]
+    VERIFY --> CLEAN[Display sanitizer]
+    CLEAN --> RESULT[Summary, visuals, and Q&A]
+    RESULT --> IMAGE[Server-owned VisualSpec → GPT Image 2 → visual check]
 
-    OBJECTS[(Encrypted object store)] --- FILES
-    DB[(Postgres)] --- FLOW
-    DB --- FACTS
-    INGEST[Offline evidence ingestion] --> EVIDENCE
+    STATE[(SQLite locally / Neon on Vercel)] --- SESSION
+    STATE --- ACCEPT
+    STATE --- RESULT
 ```
 
-The central rule is **facts first, prose last**. Components exchange typed records, not unconstrained model-written text.
+The core rule is **facts first, prose last**. Models return Zod-validated structured data. Patient-specific output must refer to stored source spans.
 
-## 4. System layers
+## 4. Models and responsibilities
 
-| Layer | Responsibility |
-|---|---|
-| 1. Experience | Input, uploads, review, source viewer, five cards, visuals, and Q&A |
-| 2. Trust edge | Consent, age gate, authorization, rate limits, upload limits, and signed URLs |
-| 3. Workflow | Explicit case states, jobs, retries, timeouts, and deletion |
-| 4. Document intelligence | File sanitation, local parsing, OCR, layout, tables, and typed extraction |
-| 5. Facts and evidence | Confirmed source-linked facts and an approved offline evidence corpus |
-| 6. Explanation and safety | Synthesis, deterministic validation, claim verification, and localization |
-| 7. Data and operations | Encrypted storage, audit, model versions, metrics, alerts, and retention |
+| Stage | Current implementation | Hard rule |
+|---|---|---|
+| OCR | Sarvam Document Intelligence for every uploaded PDF/JPG/PNG | OCR text is untrusted input; no instructions from a document may be followed |
+| Fact extraction | `gpt-5.6-terra`, low reasoning, strict schema | Literal observations and written medicine instructions only |
+| Synthesis | `gpt-5.6-sol`, medium reasoning, strict schema | Exactly five cards; no diagnosis, causes, prognosis, or treatment advice |
+| Safety verification | A fresh `gpt-5.6-sol` call | Reject unsupported or unsafe drafts; never silently repair them |
+| Q&A | `gpt-5.6-terra`, low reasoning | Use only case facts and the approved summary; return “cannot determine” when unsupported |
+| Picture explanation | `gpt-image-2`, medium quality | Render only a server-owned, text-free physiology scene; never decide the medicine |
+| Picture validation | `gpt-5.6-terra`, low reasoning with image input | Reject text, unrelated biology, diagnosis, damage, treatment, advice, or alarming content |
+| Translation | No separate service | OpenAI writes directly in the selected language |
+| Voice | Sarvam Saaras v3 STT and Bulbul v3 TTS | Turn-based input; transcript stays editable; audio never autoplays |
 
-## 5. Bounded agents and model routing
+Model names can be changed with `OPENAI_EXTRACTION_MODEL`, `OPENAI_SYNTHESIS_MODEL`, and `OPENAI_QUESTION_MODEL`. Keep the defaults until a local evaluation proves another route is better.
 
-These are narrow services with fixed inputs and outputs. They do not plan freely or call arbitrary tools.
+The name is stored separately and is not sent to the model. Age, symptoms, and history are context only; prompts prohibit turning them into medical claims.
 
-| Component | Final implementation | Output | Hard rule |
-|---|---|---|---|
-| Intake normalizer | Code; Sarvam Saaras v3 for voice | Confirmed transcript and language | User sees and confirms the transcript |
-| Document extractor | Local PDF parser, then Sarvam Vision 1.5 when OCR is needed; GPT-5.6 Terra for strict structuring | Source spans, observations, and medication candidates | No tools or web access; document text is untrusted |
-| Fact reconciler | Deterministic code; Terra only for terminology candidates | Duplicates, comparable results, conflicts, and review tasks | Preserve original text and values |
-| Evidence retriever | Postgres full-text search plus `pgvector` | Reviewed evidence passages | Search only the approved internal corpus |
-| Explanation synthesizer | GPT-5.6 Sol, medium reasoning | Exactly five cards and typed claims | Every claim must cite a fact or evidence passage |
-| Safety verifier | Code plus a separate fresh GPT-5.6 Sol call | Supported, contradicted, insufficient, or unsafe | It rejects failed claims; it does not repair them silently |
-| Localizer | Sarvam Translate, locked glossary, Terra back-check; Bulbul v2 for speech | One-to-one translations of verified claims | Names, medicines, doses, values, and units are protected tokens |
-| Q&A agent | GPT-5.6 Terra; Sol only for conflicts | Concise answer, type, uncertainty, and citations | Case-scoped retrieval only; no external actions or live web |
+## 5. Deterministic controls
 
-Use one approved primary model provider in the live patient path. Benchmark Gemini 3.7 Flash and Claude Sonnet 5 offline on de-identified cases. Do not send each live case to several providers for voting. Do not silently fall back to an unevaluated model.
+The current code:
 
-## 6. Workflow and failure behavior
+- validates actual file bytes for PDF, JPEG, or PNG;
+- limits each file to 10 MB and each case to 10 files;
+- limits OCR text to 160,000 characters;
+- accepts only extraction excerpts that occur on the stated OCR page;
+- recomputes a numeric high/low/normal flag when a parseable two-number range exists;
+- validates all model and API payloads with Zod;
+- verifies that all cited span IDs exist;
+- requires citations on document-fact answers;
+- strips leaked `span_UUID` values and simple Markdown from displayed text;
+- creates exact range bars and timelines in React;
+- selects one confirmed, non-review observation with deterministic code before image generation;
+- keeps values, ranges, names, dates, medicines, and localized copy out of generated artwork and in accessible HTML;
+- keeps all API responses private with `Cache-Control: no-store`.
+
+Current limits are not a production clinical validation system. Extraction confidence is enforced but not persisted for audit, mixed-patient uploads are not detected, live source boxes are placeholders, and files are not malware-scanned or structurally sanitized.
+
+## 6. State and storage
+
+The effective state path is:
 
 ```text
-DRAFT → UPLOADED → SCANNED → EXTRACTED → NEEDS_REVIEW
-      → CONFIRMED → ENRICHED → DRAFTED → VERIFIED → READY
+DRAFT → UPLOADED → EXTRACTING → NEEDS_REVIEW → CONFIRMED → READY
 ```
 
-Terminal or recoverable failure states:
+`UPLOADED` is skipped for the synthetic sample. `NEEDS_REVIEW` and `CONFIRMED` are hidden internal names. `VERIFIED` exists in the type but is not persisted as a separate step. Recoverable failure states are `EXTRACTION_FAILED` and `SAFETY_FAILED`.
+
+| Environment | Case state | Files |
+|---|---|---|
+| Local | Node SQLite in `.data/mvp.sqlite` | private files in `.data/uploads` |
+| Vercel | Neon Postgres | private Vercel Blob |
+
+Do not add Convex. The current Postgres and Blob split is simple and sufficient for this MVP.
+
+The schema is created lazily by the application. It stores sessions, cases, a separate identity row, uploads, and conversation turns. There is no account or case list. The current tab keeps one active case ID in `sessionStorage` and can resume that temporary case after refresh while the session and case remain valid.
+
+## 7. Auth, privacy, and retention
+
+There are two separate controls:
+
+1. `MVP_ACCESS_CODE` enables an HTTP Basic access gate for the whole deployment. The username is `vera`. This is a buildathon gate, not end-user authentication.
+2. Each browser receives an opaque httpOnly session cookie. Mutations require same-origin requests and a session-derived CSRF token.
+
+Production fails closed when the access code, Postgres, or Blob configuration is missing. `ALLOW_UNPROTECTED_MVP=true` is an explicit emergency override and should remain unset.
+
+Sessions and cases have a 24-hour absolute lifetime and a 30-minute idle lifetime. Cleanup is opportunistic: it runs when session endpoints are used, not from a durable scheduled job. “Delete case and start over” deletes the database case and its stored files immediately when the request succeeds.
+
+The buildathon must use only synthetic or fully de-identified files. Real patient data needs vendor health-data terms, durable deletion, audit controls, clinical validation, and Indian security, privacy, legal, and regulatory review.
+
+## 8. API boundary
 
 ```text
-REJECTED_FILE · EXTRACTION_FAILED · SAFETY_FAILED · EXPIRED · DELETED
+GET    /api/health
+GET    /api/session
+POST   /api/cases
+POST   /api/cases/:id/uploads/token   Vercel Blob token
+POST   /api/cases/:id/uploads         local upload or Blob finalization
+GET    /api/cases/:id/uploads/:uploadId
+POST   /api/cases/:id/extract
+POST   /api/cases/:id/confirmation    internal auto-accept + synthesis
+POST   /api/cases/:id/questions
+POST   /api/cases/:id/speech/transcribe
+POST   /api/cases/:id/speech/synthesize
+POST   /api/cases/:id/visual-explanation
+POST   /api/speech/transcribe          intake voice input
+GET    /api/cases/:id
+DELETE /api/cases/:id
 ```
 
-Each transition is idempotent. Persist the case ID, input hash, schema version, prompt version, pinned model ID, output hash, status, and token count. A retry must not duplicate a case or claim.
+Every case route checks ownership through the anonymous session. Current abuse guards allow 25 active cases per browser session and 20 questions per case.
 
-If OCR, synthesis, or verification fails, show a clear delayed or review-needed state. Never produce an unchecked answer to keep the flow moving.
+## 9. Deliberate exclusions
 
-## 7. Data contracts
+- No autonomous agent framework or swarm.
+- No Convex, microservices, queue, Kubernetes, Kafka, or graph database.
+- No live patient-context internet research.
+- No approved external evidence corpus yet.
+- No DICOM or diagnostic-image interpretation.
+- No generated depiction of patient anatomy, pathology, diagnosis, treatment, or improvement.
+- No full-duplex or phone-style voice conversation.
+- No user accounts or long-term history.
+- No real patient data in this buildathon version.
 
-The minimum source-of-truth entities are:
+## 10. Next architecture gates
 
-- `Case` and `ConsentRecord`;
-- `Document`, `DocumentPage`, and `SourceSpan`;
-- `Observation` and `MedicationInstruction`;
-- `EvidencePassage`;
-- `ClinicalClaim`;
-- `AnalysisRun` and `SafetyFinding`;
-- `ConversationTurn`.
+Before any real-patient pilot:
 
-Every confirmed fact stores:
+1. Build a de-identified, clinician-labeled evaluation set by language and report type.
+2. Persist safe extraction-confidence audit metadata and expand deterministic rejection tests; do not reintroduce a checkbox for every value.
+3. Detect mixed-patient uploads and inconsistent dates, units, decimals, doses, and identities.
+4. Add real document sanitation, malware scanning, reliable page coordinates, and source-region viewing.
+5. Add durable scheduled deletion, PHI-safe telemetry, provider latency metrics, retries, and a kill switch.
+6. Run native-language and clinical review of every localized UI, safety, speech, and generated-picture string.
+7. Tighten Q&A length and multilingual boundary tests.
+8. Add a curated, versioned, clinician-reviewed evidence corpus only if general education is required.
+9. Complete clinical, security, privacy, legal, and medical-device review.
 
-- original text;
-- normalized candidate, without replacing the original;
-- value, unit, date, and printed reference range when applicable;
-- document ID, page, bounding box, and text hash;
-- extraction status and user-confirmation status.
+## 11. Final decisions
 
-Every displayed claim must satisfy one of these contracts:
-
-```text
-Patient claim   → one or more confirmed SourceSpan IDs
-Education claim → one or more approved EvidencePassage IDs
-No support      → omit the claim or return “cannot determine”
-```
-
-Keep identity separate from clinical case data. Do not send the user's name to models by default.
-
-## 8. Evidence design
-
-Run evidence ingestion outside the patient request path:
-
-1. Fetch only approved sources such as MoHFW, ICMR, CDSCO, PvPI, and WHO.
-2. Store publisher, title, date, jurisdiction, section, URL, hash, and review status.
-3. Require clinician review before publication into the runtime corpus.
-4. Version and expire superseded passages.
-5. Retrieve only from this corpus during analysis and Q&A.
-
-Population information can provide general education. It cannot establish a condition in an individual.
-
-## 9. Safety and privacy invariants
-
-- Use synthetic or fully de-identified documents during the buildathon.
-- Reject mixed-patient uploads before merging facts.
-- Require review of uncertain patient identity, date, decimal, value, unit, medicine, dose, frequency, and duration.
-- Use the reference range printed by the reporting laboratory.
-- Restate prescription instructions only when the doctor wrote them. Otherwise say “Not specified in the prescription.”
-- Run numeric, unit, medication, citation, and prohibited-advice checks before display.
-- Use clinician-authored emergency banner rules. An LLM is never the sole triage mechanism.
-- Treat uploaded files and their text as untrusted. Scan and sanitize files in a network-disabled worker.
-- Encrypt files and database data. Keep clinical text out of logs and analytics.
-- Use short retention and an end-to-end deletion workflow.
-- Do not use provider-managed conversation memory, hosted patient vector stores, or live web search.
-- Do not accept DICOM in the MVP. A later version may extract a signed radiology report, never interpret pixels with a general model.
-- Render range bars, trends, timelines, and medication cards with React/SVG. Do not generate patient-specific medical imagery.
-
-Real patient data requires approved health-data contracts, retention controls, security review, clinical validation, and Indian legal and regulatory review.
-
-## 10. API boundary
-
-Keep the application API small:
-
-```text
-POST   /cases                         create case and consent record
-POST   /cases/:id/uploads             upload through signed object-store URL
-POST   /cases/:id/extraction          start idempotent extraction
-GET    /cases/:id/review              get extracted fields and source regions
-POST   /cases/:id/confirmation        confirm or correct critical fields
-GET    /cases/:id/analysis            get state or verified five-card result
-POST   /cases/:id/questions           ask a grounded question
-DELETE /cases/:id                     delete the case and all clinical content
-```
-
-Every route must check case ownership. Workers receive short-lived, case-scoped access only.
-
-## 11. Implementation stack
-
-The working buildathon MVP is one Next.js and TypeScript application:
-
-- signed anonymous sessions with same-origin and CSRF checks;
-- Neon Postgres for durable Vercel workflow state;
-- private Vercel Blob files uploaded with short-lived, case-scoped tokens;
-- local SQLite and private local files as the development fallback;
-- Sarvam Vision 1.5 document digitisation;
-- GPT-5.6 Terra for strict extraction and Q&A;
-- GPT-5.6 Sol for five-card synthesis and a separate safety check;
-- Zod contracts at every model and API boundary;
-- deterministic React range, timeline, prescription, and source views;
-- direct official SDKs behind small provider adapters;
-- synthetic or de-identified files only.
-
-The buildathon deployment is restricted to synthetic or fully de-identified files. Before identified patient data, add an approved region, durable scheduled deletion, vendor health-data terms, audit trails, content-safe telemetry, clinical validation, and a security and legal review.
-
-Do not add microservices, Kubernetes, Kafka, a graph database, or a general agent framework for the first version.
-
-## 12. Buildathon scope
-
-### Must ship
-
-- English plus one clinically reviewed Indic language;
-- PDF/JPEG/PNG upload with a fixed total page limit;
-- local text extraction and Sarvam OCR fallback;
-- critical-field review with source highlights;
-- five verified source-linked cards;
-- exact prescription restatement;
-- deterministic range and timeline/medication visuals;
-- grounded text Q&A;
-- safe refusals and failure states;
-- synthetic evaluation fixtures.
-
-### Ship only after the vertical slice is stable
-
-- voice input and spoken output;
-- all four Indic languages;
-- broader historical trend matching;
-- accounts and long-term history.
-
-### Out of scope
-
-- real patient data at the event;
-- diagnosis, treatment, autonomous triage, or drug-interaction advice;
-- DICOM and medical-image interpretation;
-- live patient-context web research;
-- minors without verified guardian consent;
-- generative medical imagery;
-- multi-provider voting in production.
-
-## 13. Release gates
-
-Do not release a language or document type until its test set passes:
-
-- 100% source coverage for patient-specific claims;
-- zero unsupported diagnosis, treatment, dose change, or test-order claims;
-- every critical medication and laboratory field is exact or blocked for review;
-- 100% blocking of known mixed-patient cases;
-- zero critical translation changes to negation, medicine, dose, value, unit, or frequency;
-- 100% recall on the small clinician-approved emergency test set;
-- zero successful document prompt-injection attacks;
-- verified consent, access control, deletion, rollback, model pinning, and kill switch.
-
-Track extraction accuracy, unsupported-claim rate, critical-error rate, review burden, latency, retry rate, and cost by language and document type.
-
-## 14. Build order
-
-1. Freeze schemas, safety wording, and 12 synthetic fixtures.
-2. Build upload, sanitation, parsing, OCR, and source coordinates.
-3. Build extracted-fact review and confirmation.
-4. Build five-card synthesis and both verification gates.
-5. Add source viewer, deterministic visuals, and grounded Q&A.
-6. Add one Indic language with protected-token translation.
-7. Test mixed patients, unreadable doses, decimals, prompt injection, outages, and deletion.
-8. Add voice only if the complete text path is stable.
-
-## 15. Final decisions
-
-1. Explanation, not diagnosis.
-2. Explicit workflow, not an autonomous agent swarm.
-3. Confirmed facts are the source of truth.
-4. User review is mandatory for critical uncertainty.
-5. Every claim is traceable to a document or approved evidence.
-6. One primary live model path; challengers compete offline.
-7. Curated evidence replaces patient-context web search.
-8. Deterministic visuals replace generated medical imagery.
-9. DICOM pixels remain outside this product.
-10. Synthetic data is the only buildathon data.
+1. Explain documents; do not diagnose or advise.
+2. Keep one explicit workflow; do not build a general autonomous agent.
+3. Keep document facts and source spans as the source of truth.
+4. Verify internally; do not make low-literacy users approve every extracted field.
+5. Preserve the current confidence and source checks; omit or block uncertain critical facts.
+6. Keep one primary live provider path; evaluate alternatives offline.
+7. Keep exact medical facts in deterministic UI. Use generated imagery only as a checked, supplemental physiology explanation.
+8. Keep DICOM pixels, live web research, and real patient data out of the MVP.
