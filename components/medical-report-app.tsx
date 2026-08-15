@@ -9,7 +9,7 @@ import { ExplanationStep } from "@/components/explanation-step";
 import { AboutStep, DocumentsStep, type IntakeDraft } from "@/components/intake-upload-step";
 import { ProgressStepper } from "@/components/progress-stepper";
 
-type AppStep = "about" | "documents" | "explanation";
+type AppStep = "about" | "documents" | "explanation" | "questions";
 
 const initialDraft: IntakeDraft = {
   preferredName: "",
@@ -111,7 +111,7 @@ export function MedicalReportApp() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const activeStep = step === "about" ? 1 : step === "documents" ? 2 : 3;
+  const activeStep = step === "about" ? 1 : step === "documents" ? 2 : step === "explanation" ? 3 : 4;
 
   return (
     <div className="app-shell">
@@ -159,14 +159,23 @@ export function MedicalReportApp() {
           />
         ) : null}
 
-        {step === "explanation" && caseView?.analysis ? (
+        {(step === "explanation" || step === "questions") && caseView?.analysis ? (
           <ExplanationStep
             analysis={caseView.analysis}
             busy={busy}
             error={error}
             facts={facts}
             onAsk={askQuestion}
+            onBackToSummary={() => {
+              setStep("explanation");
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+            onOpenQuestions={() => {
+              setStep("questions");
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
             onStartOver={startOver}
+            view={step === "questions" ? "questions" : "summary"}
           />
         ) : null}
       </div>

@@ -13,6 +13,14 @@ import {
 } from "lucide-react";
 import { supportedLanguages, type Intake } from "@/lib/contracts";
 
+const languageLabels: Record<Intake["language"], string> = {
+  English: "English",
+  Hindi: "हिन्दी",
+  Tamil: "தமிழ்",
+  Kannada: "ಕನ್ನಡ",
+  Marathi: "मराठी",
+};
+
 export type IntakeDraft = Omit<Intake, "age"> & { age: string };
 
 type AboutStepProps = {
@@ -123,7 +131,7 @@ export function AboutStep({
                   title={disabled ? "Available when live providers are configured" : undefined}
                   type="button"
                 >
-                  {language}
+                  {languageLabels[language]}
                 </button>
               );
             })}

@@ -1,6 +1,6 @@
-const steps = ["About you", "Reports", "Your summary"] as const;
+const steps = ["About you", "Your documents", "Your summary", "Follow-up questions"] as const;
 
-export function ProgressStepper({ activeStep }: { activeStep: 1 | 2 | 3 }) {
+export function ProgressStepper({ activeStep }: { activeStep: 1 | 2 | 3 | 4 }) {
   return (
     <nav className="stepper" aria-label="Analysis progress">
       <span className="stepper__mobile-status">

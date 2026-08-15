@@ -2,6 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   ExternalLink,
   FileText,
@@ -24,7 +26,10 @@ type ExplanationStepProps = {
   facts: Fact[];
   busy: boolean;
   error: string | null;
+  view: "summary" | "questions";
   onAsk: (question: string) => Promise<QuestionResponse>;
+  onBackToSummary: () => void;
+  onOpenQuestions: () => void;
   onStartOver: () => Promise<void>;
 };
 
@@ -99,7 +104,10 @@ export function ExplanationStep({
   facts,
   busy,
   error,
+  view,
   onAsk,
+  onBackToSummary,
+  onOpenQuestions,
   onStartOver,
 }: ExplanationStepProps) {
   const [question, setQuestion] = useState(analysis.suggestedQuestions[0] ?? "");
@@ -118,6 +126,8 @@ export function ExplanationStep({
     () => facts.filter((fact): fact is MedicationFact => fact.kind === "medication"),
     [facts],
   );
+  const steadyCount = observations.filter((fact) => fact.flag === "normal").length;
+  const discussCount = observations.filter((fact) => fact.flag === "high" || fact.flag === "low").length;
   const visualObservation = observations.find(
     (fact) => numericValue(fact.value) !== null && printedRange(fact.referenceRange),
   ) ?? observations[0];
@@ -199,24 +209,46 @@ export function ExplanationStep({
 
   return (
     <main className="page-content page-content--explanation motion-enter">
-      <div className="explanation-heading">
-        <div className="page-heading">
-          <h1>Your reports, explained</h1>
-          <p>This explains what your documents say. It does not diagnose a condition or replace your doctor.</p>
-        </div>
-        <div className="checked-status">
-          <ShieldCheck aria-hidden="true" />
-          <span>Checked against {analysis.checkedDocumentCount} documents</span>
-        </div>
-      </div>
+      {view === "summary" ? (
+        <>
+          <div className="explanation-heading">
+            <div className="page-heading">
+              <h1>Here’s what your reports say</h1>
+              <p>This explains what your documents say. It does not diagnose a condition or replace your doctor.</p>
+            </div>
+            <div className="checked-status">
+              <ShieldCheck aria-hidden="true" />
+              <span>{analysis.checkedDocumentCount} documents checked</span>
+            </div>
+          </div>
 
-      <a className="mobile-qa-jump" href="#qa-heading">
-        Ask a question about these reports <Send aria-hidden="true" />
-      </a>
+          <section className="summary-overview" aria-labelledby="summary-overview-heading">
+            <div className="summary-overview__heading">
+              <h2 className="sr-only" id="summary-overview-heading">Your 5-point summary</h2>
+              <span>{steadyCount} steady</span>
+              <span className="summary-overview__discuss">{discussCount} to discuss</span>
+            </div>
+            <ol>
+              {analysis.cards.map((card) => <li key={card.id}>{card.body}</li>)}
+            </ol>
+          </section>
+        </>
+      ) : (
+        <div className="question-screen-heading">
+          <button className="icon-button" aria-label="Back to your summary" onClick={onBackToSummary} type="button">
+            <ArrowLeft aria-hidden="true" />
+          </button>
+          <div>
+            <h1>Ask Vera</h1>
+            <p>About the reports you just analysed</p>
+          </div>
+        </div>
+      )}
 
-      <div className="explanation-layout">
-        <section className="explanation-flow" aria-label="Five-point explanation">
-          {analysis.cards.map((card) => (
+      <div className={`explanation-layout explanation-layout--${view}`}>
+        {view === "summary" ? (
+          <section className="explanation-flow" aria-label="Details from your reports">
+          {analysis.cards.filter((card) => ["findings", "changes", "instructions"].includes(card.id)).map((card) => (
             <section className={`explanation-section explanation-section--${card.id}`} key={card.id}>
               <h2>{card.title}</h2>
 
@@ -340,9 +372,17 @@ export function ExplanationStep({
               ) : null}
             </section>
           ))}
-        </section>
 
-        <aside className="qa-rail" aria-labelledby="qa-heading">
+          <div className="summary-actions">
+            <button className="button button--primary button--wide" onClick={onOpenQuestions} type="button">
+              Ask a question <ArrowRight aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+        ) : null}
+
+        {view === "questions" ? (
+        <aside className="qa-rail qa-rail--screen" aria-labelledby="qa-heading">
           <h2 id="qa-heading">Ask about these documents</h2>
           <p>Questions are answered using details checked from your reports.</p>
           <form className="qa-form" onSubmit={submitQuestion}>
@@ -394,6 +434,7 @@ export function ExplanationStep({
             <span>Answers use only details checked from these reports.</span>
           </div>
         </aside>
+        ) : null}
       </div>
 
       <div className="case-footer">
