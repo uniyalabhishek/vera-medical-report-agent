@@ -10,7 +10,13 @@ import {
   removeUploads,
 } from "@/lib/server/case-repository";
 import { requireMutationSession } from "@/lib/server/session";
-import { deleteStoredUpload, finalizeCloudUpload, MAX_FILES, storeUpload } from "@/lib/server/uploads";
+import {
+  deleteStoredUpload,
+  finalizeCloudUpload,
+  MAX_FILES,
+  safeDisplayName,
+  storeUpload,
+} from "@/lib/server/uploads";
 import { getStorageMode } from "@/lib/server/storage-mode";
 
 export const runtime = "nodejs";
@@ -28,16 +34,33 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const session = await requireMutationSession(request);
     const { caseId } = await context.params;
     const caseView = await getOwnedCase(caseId, session.tokenHash);
-    if (caseView.state !== "DRAFT") {
-      throw new ApiError(409, "UPLOADS_CLOSED", "Uploads are closed after report reading starts.");
-    }
     const existing = await listUploads(caseId, session.tokenHash);
 
     if (getStorageMode() === "cloud") {
+      const input = FinalizeUploadSchema.parse(await request.json());
+      const alreadyRecorded = existing.find((upload) => upload.storedName === input.pathname);
+      if (alreadyRecorded) {
+        if (
+          alreadyRecorded.displayName !== safeDisplayName(input.displayName) ||
+          alreadyRecorded.category !== input.category
+        ) {
+          throw new ApiError(
+            409,
+            "UPLOAD_METADATA_CONFLICT",
+            "This saved upload does not match the selected file.",
+          );
+        }
+        if (input.complete && caseView.state === "DRAFT") {
+          await markCaseState(caseId, session.tokenHash, "UPLOADED");
+        }
+        return privateJson({ uploads: [alreadyRecorded] });
+      }
+      if (caseView.state !== "DRAFT") {
+        throw new ApiError(409, "UPLOADS_CLOSED", "Uploads are closed after report reading starts.");
+      }
       if (existing.length >= MAX_FILES) {
         throw new ApiError(400, "TOO_MANY_FILES", "A case can contain at most 10 files.");
       }
-      const input = FinalizeUploadSchema.parse(await request.json());
       const upload = await finalizeCloudUpload(
         caseId,
         input.pathname,
@@ -47,11 +70,26 @@ export async function POST(request: NextRequest, context: RouteContext) {
       try {
         await addUpload(caseId, session.tokenHash, upload, input.complete);
       } catch (error) {
-        const { deleteStoredUploads } = await import("@/lib/server/uploads");
-        await deleteStoredUploads([upload.storedName]).catch(() => undefined);
+        const winner = (await listUploads(caseId, session.tokenHash).catch(() => []))
+          .find((record) => record.storedName === upload.storedName);
+        if (
+          winner &&
+          winner.displayName === upload.displayName &&
+          winner.category === upload.category &&
+          winner.mimeType === upload.mimeType &&
+          winner.sizeBytes === upload.sizeBytes
+        ) {
+          return privateJson({ uploads: [winner] });
+        }
+        // Keep a valid blob at its stable path when database finalization is
+        // uncertain. The next request can safely finalize the same upload.
         throw error;
       }
       return privateJson({ uploads: [upload] }, { status: 201 });
+    }
+
+    if (caseView.state !== "DRAFT") {
+      throw new ApiError(409, "UPLOADS_CLOSED", "Uploads are closed after report reading starts.");
     }
 
     const formData = await request.formData();

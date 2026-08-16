@@ -156,6 +156,13 @@ export type CaseView = {
   expiresAt: string;
 };
 
+export type ExtractionProgress = {
+  completedPages: number;
+  totalPages: number;
+  stage?: "reading" | "checking";
+  retrying?: boolean;
+};
+
 export type ApiErrorBody = {
   error: {
     code: string;

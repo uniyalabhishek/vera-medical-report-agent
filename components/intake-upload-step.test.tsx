@@ -92,13 +92,125 @@ describe("mobile-first intake flow", () => {
         onDocumentLanguageChange={vi.fn()}
         onFilesChange={vi.fn()}
         onUseSample={vi.fn()}
+        processingProgress={null}
         processingStage={null}
+        uploadsSaved={false}
         useSample
       />,
     );
 
-    expect(screen.getByRole("button", { name: /analyse 3 documents/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /explain these reports/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /add file or take a photo/i })).toBeDisabled();
     expect(screen.getByText(/2 reports · made-up data/i)).toBeInTheDocument();
+  });
+
+  it("offers a clear continue action after a refreshed saved upload fails", () => {
+    render(
+      <DocumentsStep
+        busy={false}
+        error="Vera couldn’t finish reading this report."
+        files={[]}
+        language="English"
+        documentLanguage="English"
+        liveUploadsEnabled
+        onBack={vi.fn()}
+        onContinue={vi.fn()}
+        onDocumentLanguageChange={vi.fn()}
+        onFilesChange={vi.fn()}
+        onUseSample={vi.fn()}
+        processingProgress={null}
+        processingStage={null}
+        recoveryAction="continue"
+        uploadsSaved
+        useSample={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /^continue reading$/i })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Vera couldn’t finish reading this report.",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Your file is still here. You do not need to upload it again.",
+    );
+    expect(screen.queryByText(/your file is saved/i)).not.toBeInTheDocument();
+  });
+
+  it("offers try again after a same-tab extraction failure", () => {
+    const report = {
+      id: "report-1",
+      file: new File(["%PDF-1.4"], "report.pdf", { type: "application/pdf" }),
+      category: "report" as const,
+    };
+
+    render(
+      <DocumentsStep
+        busy={false}
+        error="Vera couldn’t finish reading this report."
+        files={[report]}
+        language="English"
+        documentLanguage="English"
+        liveUploadsEnabled
+        onBack={vi.fn()}
+        onContinue={vi.fn()}
+        onDocumentLanguageChange={vi.fn()}
+        onFilesChange={vi.fn()}
+        onUseSample={vi.fn()}
+        processingProgress={null}
+        processingStage={null}
+        recoveryAction="retry"
+        uploadsSaved
+        useSample={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /^try again$/i })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/do not need to upload it again/i);
+    expect(screen.queryByText(/your file is saved/i)).not.toBeInTheDocument();
+  });
+
+  it("shows checking and automatic retry only when the server reports them", () => {
+    const commonProps = {
+      busy: true,
+      error: null,
+      files: [],
+      language: "English" as const,
+      documentLanguage: "English" as const,
+      liveUploadsEnabled: true,
+      onBack: vi.fn(),
+      onContinue: vi.fn(),
+      onDocumentLanguageChange: vi.fn(),
+      onFilesChange: vi.fn(),
+      onUseSample: vi.fn(),
+      processingStage: "reading" as const,
+      uploadsSaved: true,
+      useSample: false,
+    };
+    const { rerender } = render(
+      <DocumentsStep
+        {...commonProps}
+        processingProgress={{ completedPages: 4, totalPages: 9, stage: "reading" }}
+      />,
+    );
+
+    expect(screen.queryByText(/trying once more/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Reading every page").closest("li")).toHaveClass("is-active");
+
+    rerender(
+      <DocumentsStep
+        {...commonProps}
+        processingProgress={{
+          completedPages: 9,
+          totalPages: 9,
+          retrying: true,
+          stage: "checking",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("This is taking longer than usual. Vera is trying once more."))
+      .toBeInTheDocument();
+    expect(screen.getByText("Checking details against the source").closest("li"))
+      .toHaveClass("is-active");
   });
 });

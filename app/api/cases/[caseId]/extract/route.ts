@@ -10,11 +10,11 @@ import {
   setCaseFacts,
   tryTransitionCaseState,
 } from "@/lib/server/case-repository";
+import { advanceLiveExtraction } from "@/lib/server/live-extraction-runner";
 import { requireMutationSession } from "@/lib/server/session";
-import { getStoredUploadData } from "@/lib/server/uploads";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 120;
 
 const ExtractSchema = z.object({ mode: z.enum(["demo", "uploaded"]) });
 type RouteContext = { params: Promise<{ caseId: string }> };
@@ -37,45 +37,95 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (mode === "uploaded" && uploads.length === 0) {
       throw new ApiError(409, "UPLOAD_REQUIRED", "Add at least one file before extraction.");
     }
-    if (
-      !await tryTransitionCaseState(
-        caseId,
-        session.tokenHash,
-        ["DRAFT", "UPLOADED", "EXTRACTION_FAILED"],
-        "EXTRACTING",
-      )
-    ) {
-      throw new ApiError(409, "EXTRACTION_IN_PROGRESS", "This case is already being extracted.");
-    }
 
-    try {
-      const provider = getProvider(mode);
-      const documents = await Promise.all(uploads.map(async (upload, index) => ({
-        id: upload.id,
-        name: `report-${index + 1}.${upload.mimeType === "application/pdf" ? "pdf" : upload.mimeType === "image/png" ? "png" : "jpg"}`,
-        mimeType: upload.mimeType,
-        sizeBytes: upload.sizeBytes,
-        category: upload.category,
-        data: await getStoredUploadData(caseId, upload.storedName),
-      })));
-      const providerFacts = FactsSchema.parse(
-        await provider.extract({
+    if (mode === "demo") {
+      if (
+        !await tryTransitionCaseState(
+          caseId,
+          session.tokenHash,
+          ["DRAFT", "EXTRACTION_FAILED"],
+          "EXTRACTING",
+        )
+      ) {
+        throw new ApiError(409, "EXTRACTION_IN_PROGRESS", "This case is already being extracted.");
+      }
+      try {
+        const facts = FactsSchema.parse(await getProvider("demo").extract({
           caseId,
           intake: caseView.intake,
           mode,
-          documents,
-        }),
+          documents: [],
+        }));
+        return privateJson({
+          case: await setCaseFacts(caseId, session.tokenHash, facts, "NEEDS_REVIEW"),
+        });
+      } catch (error) {
+        await markCaseState(caseId, session.tokenHash, "EXTRACTION_FAILED");
+        throw error;
+      }
+    }
+
+    const retryFailed = caseView.state === "EXTRACTION_FAILED";
+    if (caseView.state === "UPLOADED" || retryFailed) {
+      if (
+        !await tryTransitionCaseState(
+          caseId,
+          session.tokenHash,
+          [caseView.state],
+          "EXTRACTING",
+        )
+      ) {
+        const current = await getOwnedCase(caseId, session.tokenHash);
+        if (current.facts.length > 0) return privateJson({ case: current });
+        if (current.state === "EXTRACTING") {
+          return privateJson(
+            { case: current, retryAfterMs: 1_000 },
+            { status: 202, headers: { "Retry-After": "1" } },
+          );
+        }
+        throw new ApiError(409, "EXTRACTION_IN_PROGRESS", "Report reading is already continuing.");
+      }
+    } else if (caseView.state !== "EXTRACTING") {
+      throw new ApiError(
+        409,
+        "UPLOAD_INCOMPLETE",
+        "Finish uploading every selected file before report reading starts.",
       );
+    }
+
+    try {
+      const result = await advanceLiveExtraction({
+        caseView,
+        sessionHash: session.tokenHash,
+        uploads,
+        retryFailed,
+      });
+      if (result.kind === "pending") {
+        return privateJson(
+          {
+            case: await getOwnedCase(caseId, session.tokenHash),
+            progress: result.progress,
+            retryAfterMs: result.retryAfterMs,
+          },
+          {
+            status: 202,
+            headers: { "Retry-After": String(Math.max(1, Math.ceil(result.retryAfterMs / 1_000))) },
+          },
+        );
+      }
+
       const displayNames = new Map(uploads.map((upload) => [upload.id, upload.displayName]));
-      const facts = providerFacts.map((fact) => ({
+      const facts = FactsSchema.parse(result.facts).map((fact) => ({
         ...fact,
         source: {
           ...fact.source,
           documentName: displayNames.get(fact.source.documentId) ?? fact.source.documentName,
         },
       }));
-      const updated = await setCaseFacts(caseId, session.tokenHash, facts, "NEEDS_REVIEW");
-      return privateJson({ case: updated });
+      return privateJson({
+        case: await setCaseFacts(caseId, session.tokenHash, facts, "NEEDS_REVIEW"),
+        progress: result.progress,
+      });
     } catch (error) {
       await markCaseState(caseId, session.tokenHash, "EXTRACTION_FAILED");
       throw error;

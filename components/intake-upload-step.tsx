@@ -14,6 +14,7 @@ import {
 import {
   supportedLanguages,
   type DocumentCategory,
+  type ExtractionProgress,
   type Intake,
 } from "@/lib/contracts";
 import { getMessages, languageMeta, message } from "@/lib/i18n";
@@ -56,6 +57,9 @@ type DocumentsStepProps = {
   language: Intake["language"];
   documentLanguage: Intake["documentLanguage"];
   processingStage: ProcessingStage | null;
+  processingProgress: ExtractionProgress | null;
+  uploadsSaved: boolean;
+  recoveryAction?: "retry" | "continue" | null;
   error: string | null;
   onDocumentLanguageChange: (language: Intake["documentLanguage"]) => void;
   onFilesChange: (files: SelectedDocument[]) => void;
@@ -291,18 +295,24 @@ export function AboutStep({
 
 function ProcessingPanel({
   language,
+  progress,
   stage,
 }: {
   language: Intake["language"];
+  progress: ExtractionProgress | null;
   stage: ProcessingStage;
 }) {
   const copy = getMessages(language);
-  const stages: Array<{ id: ProcessingStage; label: string }> = [
+  const stages: Array<{ id: ProcessingStage | "checking"; label: string }> = [
     { id: "uploading", label: copy.stageUploading },
     { id: "reading", label: copy.stageReading },
+    { id: "checking", label: copy.stageChecking },
     { id: "writing", label: copy.stageWriting },
   ];
-  const activeIndex = stages.findIndex((item) => item.id === stage);
+  const visibleStage = stage === "reading" && progress?.stage === "checking"
+    ? "checking"
+    : stage;
+  const activeIndex = stages.findIndex((item) => item.id === visibleStage);
 
   return (
     <section className="processing-panel" aria-live="polite" aria-busy="true">
@@ -310,6 +320,15 @@ function ProcessingPanel({
       <div>
         <h2>{copy.processingTitle}</h2>
         <p>{copy.processingHint}</p>
+        {stage === "reading" && progress?.totalPages ? (
+          <p>
+            {message(language, "pagesRead", {
+              completed: progress.completedPages.toLocaleString(languageMeta[language].locale),
+              total: progress.totalPages.toLocaleString(languageMeta[language].locale),
+            })}
+          </p>
+        ) : null}
+        {progress?.retrying ? <p>{copy.automaticRetrying}</p> : null}
         <ol>
           {stages.map((item, index) => (
             <li
@@ -334,6 +353,9 @@ export function DocumentsStep({
   language,
   documentLanguage,
   processingStage,
+  processingProgress,
+  uploadsSaved,
+  recoveryAction = null,
   error,
   onDocumentLanguageChange,
   onFilesChange,
@@ -369,8 +391,8 @@ export function DocumentsStep({
   const reports = files.filter((item) => item.category === "report");
   const currentPrescriptions = files.filter((item) => item.category === "current-prescription");
   const pastPrescriptions = files.filter((item) => item.category === "past-prescription");
-  const documentCount = useSample ? 3 : files.length;
-  const validDocuments = useSample || files.length > 0;
+  const validDocuments = uploadsSaved || useSample || files.length > 0;
+  const savedRecoveryVisible = uploadsSaved && !useSample && recoveryAction !== null;
 
   const fileRow = (item: SelectedDocument) => (
     <div className="file-row" key={item.id}>
@@ -405,7 +427,11 @@ export function DocumentsStep({
       </header>
 
       {busy && processingStage ? (
-        <ProcessingPanel language={language} stage={processingStage} />
+        <ProcessingPanel
+          language={language}
+          progress={processingProgress}
+          stage={processingStage}
+        />
       ) : (
         <div className="documents-form">
           <section className="document-section" aria-labelledby="reports-heading">
@@ -529,7 +555,11 @@ export function DocumentsStep({
             />
           </section>
 
-          <div className="document-note">{copy.deleteAnyTime}</div>
+          {!(error && savedRecoveryVisible) ? (
+            <div className="document-note">
+              {uploadsSaved ? copy.uploadSavedNotice : copy.deleteAnyTime}
+            </div>
+          ) : null}
 
           {!useSample ? (
             <button className="sample-link" onClick={onUseSample} type="button">
@@ -544,7 +574,17 @@ export function DocumentsStep({
         </div>
       )}
 
-      {error ? <div className="inline-alert" role="alert">{error}</div> : null}
+      {error ? (
+        <div className="inline-alert" role="alert">
+          {savedRecoveryVisible ? (
+            <span>
+              <strong>{error}</strong>
+              <br />
+              {copy.savedFileStillHere}
+            </span>
+          ) : error}
+        </div>
+      ) : null}
 
       <div className="screen-actions screen-actions--documents">
         <button
@@ -555,9 +595,11 @@ export function DocumentsStep({
         >
           {busy
             ? copy.processingTitle
-            : message(language, "analyseDocuments", {
-                count: documentCount.toLocaleString(languageMeta[language].locale),
-              })}
+            : recoveryAction === "retry"
+              ? copy.retry
+              : recoveryAction === "continue"
+                ? copy.continueReading
+                : copy.analyseDocuments}
           {busy ? <LoaderCircle className="spinner" aria-hidden="true" /> : null}
         </button>
       </div>

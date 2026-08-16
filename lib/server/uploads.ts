@@ -107,7 +107,7 @@ function assertCloudStoredName(caseId: string, storedName: string) {
 
 async function readCloudUpload(caseId: string, storedName: string) {
   assertCloudStoredName(caseId, storedName);
-  const result = await get(storedName, { access: "private" });
+  const result = await get(storedName, { access: "private", useCache: false });
   if (!result || result.statusCode !== 200) {
     throw new ApiError(404, "UPLOAD_NOT_FOUND", "The uploaded file could not be found.");
   }
@@ -124,11 +124,9 @@ export async function finalizeCloudUpload(
   if (getStorageMode() !== "cloud") {
     throw new ApiError(409, "LOCAL_UPLOAD_REQUIRED", "Use the local upload flow.");
   }
-  let ownedPath = false;
+  const match = assertCloudStoredName(caseId, storedName);
+  const { bytes } = await readCloudUpload(caseId, storedName);
   try {
-    const match = assertCloudStoredName(caseId, storedName);
-    ownedPath = true;
-    const { bytes } = await readCloudUpload(caseId, storedName);
     const detected = validateBytes(bytes);
     return {
       id: match[2],
@@ -140,7 +138,10 @@ export async function finalizeCloudUpload(
       category,
     };
   } catch (error) {
-    if (ownedPath) await del(storedName).catch(() => undefined);
+    // Delete only a blob whose bytes are invalid. A transient storage read
+    // failure happens before this block and must leave the resumable upload in
+    // place for the next attempt.
+    await del(storedName).catch(() => undefined);
     throw error;
   }
 }

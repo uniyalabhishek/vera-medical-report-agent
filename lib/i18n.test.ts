@@ -23,6 +23,11 @@ const criticalKeys = [
   "documentsTitle",
   "addReport",
   "processingTitle",
+  "automaticRetrying",
+  "analysisSavedFailed",
+  "savedFileStillHere",
+  "analyseDocuments",
+  "continueReading",
   "summaryTitle",
   "pictureTitle",
   "whereNumbersSit",
@@ -60,6 +65,29 @@ describe("localized user flow", () => {
       expect(getMessages(language).documentsBody).not.toMatch(
         /provider|de-identified|\bocr\b|transcript/iu,
       );
+      for (const key of [
+        "analysisSavedFailed",
+        "savedFileStillHere",
+        "automaticRetrying",
+      ] as const) {
+        expect(getMessages(language)[key]).not.toMatch(
+          /provider|error code|chunk|\bocr\b/iu,
+        );
+      }
+    }
+  });
+
+  it("uses simple recovery actions without count-dependent grammar", () => {
+    expect(getMessages("English")).toMatchObject({
+      analyseDocuments: "Explain these reports",
+      continueReading: "Continue reading",
+      retry: "Try again",
+      analysisSavedFailed: "Vera couldn’t finish reading this report.",
+      savedFileStillHere: "Your file is still here. You do not need to upload it again.",
+    });
+
+    for (const language of supportedLanguages) {
+      expect(getMessages(language).analyseDocuments).not.toContain("{count}");
     }
   });
 

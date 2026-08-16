@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CaseView, Intake, QuestionResponse } from "@/lib/contracts";
+import type {
+  CaseView,
+  ExtractionProgress,
+  Intake,
+  QuestionResponse,
+} from "@/lib/contracts";
 import { IntakeSchema } from "@/lib/contracts";
 import { ClientApiError, medicalReportApi } from "@/lib/client/api";
 import { ExplanationStep } from "@/components/explanation-step";
@@ -15,6 +20,7 @@ import {
 import { getMessages, languageMeta } from "@/lib/i18n";
 
 type AppStep = "about" | "documents" | "explanation" | "questions";
+type RecoveryAction = "retry" | "continue" | null;
 
 const SAVED_CASE_KEY = "vera-active-case";
 const initialDraft: IntakeDraft = {
@@ -26,18 +32,28 @@ const initialDraft: IntakeDraft = {
   medicalHistory: "",
 };
 
-function safeMessage(error: unknown, language: Intake["language"]) {
+function safeMessage(
+  error: unknown,
+  language: Intake["language"],
+  stage?: ProcessingStage | null,
+  uploadSaved = false,
+) {
   const copy = getMessages(language);
   if (error instanceof ClientApiError) {
     if (error.status === 401 || error.status === 403) return copy.privateSessionExpired;
+    if (error.code === "DETAILS_CHANGED_REUPLOAD") return copy.detailsChangedReupload;
+    if (stage === "uploading") return copy.uploadFailed;
     if (
       error.code === "PROVIDER_PROCESSING_FAILED" ||
       error.code === "SAFETY_CHECK_FAILED" ||
-      error.code === "EXTRACTION_FAILED"
+      error.code === "EXTRACTION_FAILED" ||
+      error.code === "EXTRACTION_WAIT_TIMEOUT"
     ) {
-      return copy.analysisFailed;
+      return uploadSaved ? copy.analysisSavedFailed : copy.analysisFailed;
     }
   }
+  if (stage === "uploading") return copy.uploadFailed;
+  if (uploadSaved && stage === "reading") return copy.analysisSavedFailed;
   return copy.genericError;
 }
 
@@ -52,6 +68,25 @@ function intakeFromDraft(draft: IntakeDraft): Intake {
   });
 }
 
+function analysisFingerprint(
+  intake: Intake,
+  mode: "demo" | "uploaded",
+  files: SelectedDocument[],
+) {
+  return JSON.stringify({
+    intake,
+    mode,
+    files: files.map(({ id, file, category }) => ({
+      id,
+      category,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified,
+    })),
+  });
+}
+
 export function MedicalReportApp() {
   const [step, setStep] = useState<AppStep>("about");
   const [draft, setDraft] = useState<IntakeDraft>(initialDraft);
@@ -63,8 +98,13 @@ export function MedicalReportApp() {
   const [speechOutputEnabled, setSpeechOutputEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [processingStage, setProcessingStage] = useState<ProcessingStage | null>(null);
+  const [processingProgress, setProcessingProgress] = useState<ExtractionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [caseView, setCaseView] = useState<CaseView | null>(null);
+  const [caseFingerprint, setCaseFingerprint] = useState<string | null>(null);
+  const [uploadsSaved, setUploadsSaved] = useState(false);
+  const [recoveryAction, setRecoveryAction] = useState<RecoveryAction>(null);
+  const analysisBusy = useRef(false);
   const resumeAttempted = useRef(false);
   const languageRef = useRef(draft.language);
 
@@ -80,6 +120,7 @@ export function MedicalReportApp() {
     });
     setStep("explanation");
     setError(null);
+    setRecoveryAction(null);
     sessionStorage.setItem(SAVED_CASE_KEY, ready.id);
   }, []);
 
@@ -98,6 +139,7 @@ export function MedicalReportApp() {
       const savedCaseId = sessionStorage.getItem(SAVED_CASE_KEY);
       if (!savedCaseId) return;
 
+      let resumeCanContinue = false;
       try {
         let saved = await medicalReportApi.getCase(savedCaseId);
         setDraft({
@@ -116,10 +158,32 @@ export function MedicalReportApp() {
 
         setStep("documents");
         setUseSample(saved.providerMode === "demo");
+        setCaseView(saved);
+        const hasSavedUpload = saved.providerMode === "live" && saved.state !== "DRAFT";
+        resumeCanContinue = hasSavedUpload || saved.providerMode === "demo";
+        setUploadsSaved(hasSavedUpload);
+        setRecoveryAction(null);
+        setCaseFingerprint(analysisFingerprint(
+          { ...saved.intake, preferredName: saved.preferredName },
+          saved.providerMode === "demo" ? "demo" : "uploaded",
+          [],
+        ));
+
+        if (saved.state === "DRAFT" && saved.providerMode === "live") {
+          await medicalReportApi.deleteCase(saved.id).catch(() => undefined);
+          sessionStorage.removeItem(SAVED_CASE_KEY);
+          setCaseView(null);
+          setCaseFingerprint(null);
+          setRecoveryAction(null);
+          setError(getMessages(saved.intake.language).uploadInterrupted);
+          return;
+        }
+
         setBusy(true);
 
         if (
           saved.state === "UPLOADED" ||
+          saved.state === "EXTRACTING" ||
           saved.state === "EXTRACTION_FAILED" ||
           (saved.state === "DRAFT" && saved.providerMode === "demo")
         ) {
@@ -127,7 +191,9 @@ export function MedicalReportApp() {
           saved = await medicalReportApi.extract(
             saved.id,
             saved.providerMode === "demo" ? "demo" : "uploaded",
+            setProcessingProgress,
           );
+          setCaseView(saved);
         }
         if (
           saved.state === "NEEDS_REVIEW" ||
@@ -139,11 +205,22 @@ export function MedicalReportApp() {
         }
         if (saved.state === "READY" && saved.analysis) openReadyCase(saved);
       } catch (caught) {
-        sessionStorage.removeItem(SAVED_CASE_KEY);
-        setError(safeMessage(caught, languageRef.current));
+        const sessionUnavailable =
+          caught instanceof ClientApiError &&
+          (caught.status === 401 || caught.status === 403 || caught.status === 404);
+        if (sessionUnavailable) {
+          sessionStorage.removeItem(SAVED_CASE_KEY);
+          setCaseView(null);
+          setCaseFingerprint(null);
+          setUploadsSaved(false);
+        }
+        const canContinue = resumeCanContinue && !sessionUnavailable;
+        setRecoveryAction(canContinue ? "continue" : null);
+        setError(safeMessage(caught, languageRef.current, "reading", canContinue));
       } finally {
         setBusy(false);
         setProcessingStage(null);
+        setProcessingProgress(null);
       }
     } catch (caught) {
       setSessionReady(false);
@@ -176,40 +253,92 @@ export function MedicalReportApp() {
   };
 
   const analyzeReports = async () => {
+    if (analysisBusy.current) return;
+    analysisBusy.current = true;
     setBusy(true);
     setError(null);
+    setRecoveryAction(null);
+    setProcessingProgress(null);
     setProcessingStage("uploading");
-    let createdCaseId: string | null = null;
-    let uploadComplete = false;
+    let activeStage: ProcessingStage = "uploading";
+    let uploadIsSaved = uploadsSaved;
     const mode = useSample ? "demo" : "uploaded";
 
     try {
       const intake = intakeFromDraft(draft);
-      const created = await medicalReportApi.createCase(intake, mode);
-      createdCaseId = created.id;
-      sessionStorage.setItem(SAVED_CASE_KEY, created.id);
-
-      if (mode === "uploaded") {
-        await medicalReportApi.uploadFiles(created.id, files);
+      const fingerprint = analysisFingerprint(intake, mode, files);
+      const savedUploadDetailsChanged =
+        caseView &&
+        !caseView.analysis &&
+        uploadsSaved &&
+        files.length === 0 &&
+        caseFingerprint !== null &&
+        caseFingerprint !== fingerprint;
+      if (savedUploadDetailsChanged) {
+        setUploadsSaved(false);
+        throw new ClientApiError(
+          "DETAILS_CHANGED_REUPLOAD",
+          "The details changed after this upload was saved.",
+          409,
+        );
       }
-      uploadComplete = true;
+      let workingCase = caseView && !caseView.analysis &&
+          caseFingerprint === fingerprint
+        ? caseView
+        : null;
+      if (!workingCase) {
+        if (caseView && !caseView.analysis) {
+          await medicalReportApi.deleteCase(caseView.id).catch(() => undefined);
+        }
+        workingCase = await medicalReportApi.createCase(intake, mode);
+        setCaseView(workingCase);
+        setCaseFingerprint(fingerprint);
+        setUploadsSaved(mode === "demo");
+        uploadIsSaved = mode === "demo";
+        sessionStorage.setItem(SAVED_CASE_KEY, workingCase.id);
+      }
 
+      if (mode === "uploaded" && !uploadIsSaved) {
+        await medicalReportApi.uploadFiles(workingCase.id, files);
+        uploadIsSaved = true;
+        setUploadsSaved(true);
+      }
+
+      activeStage = "reading";
       setProcessingStage("reading");
-      const extracted = await medicalReportApi.extract(created.id, mode);
+      const extracted =
+        workingCase.state === "NEEDS_REVIEW" ||
+        workingCase.state === "CONFIRMED" ||
+        workingCase.state === "SAFETY_FAILED"
+          ? workingCase
+          : await medicalReportApi.extract(
+              workingCase.id,
+              mode,
+              setProcessingProgress,
+            );
+      setCaseView(extracted);
+      activeStage = "writing";
       setProcessingStage("writing");
       const ready = await medicalReportApi.confirm(extracted.id);
       openReadyCase(ready);
     } catch (caught) {
-      if (mode === "uploaded" && createdCaseId && !uploadComplete) {
-        await medicalReportApi.deleteCase(createdCaseId).catch(() => undefined);
-        if (sessionStorage.getItem(SAVED_CASE_KEY) === createdCaseId) {
-          sessionStorage.removeItem(SAVED_CASE_KEY);
-        }
+      const detailsChanged =
+        caught instanceof ClientApiError && caught.code === "DETAILS_CHANGED_REUPLOAD";
+      const sessionUnavailable =
+        caught instanceof ClientApiError &&
+        (caught.status === 401 || caught.status === 403 || caught.status === 404);
+      const canRetry = uploadIsSaved && !detailsChanged && !sessionUnavailable;
+      if (sessionUnavailable) {
+        sessionStorage.removeItem(SAVED_CASE_KEY);
+        setUploadsSaved(false);
       }
-      setError(safeMessage(caught, draft.language));
+      setRecoveryAction(canRetry ? "retry" : null);
+      setError(safeMessage(caught, draft.language, activeStage, canRetry));
     } finally {
+      analysisBusy.current = false;
       setBusy(false);
       setProcessingStage(null);
+      setProcessingProgress(null);
     }
   };
 
@@ -227,12 +356,15 @@ export function MedicalReportApp() {
     try {
       await medicalReportApi.deleteCase(caseView.id);
       sessionStorage.removeItem(SAVED_CASE_KEY);
-      const { language, documentLanguage } = draft;
+      const { language } = draft;
       setStep("about");
       setCaseView(null);
+      setCaseFingerprint(null);
+      setUploadsSaved(false);
+      setRecoveryAction(null);
       setFiles([]);
       setUseSample(false);
-      setDraft({ ...initialDraft, language, documentLanguage });
+      setDraft({ ...initialDraft, language, documentLanguage: language });
     } catch {
       setError(copy.deleteFailed);
     } finally {
@@ -277,6 +409,8 @@ export function MedicalReportApp() {
             }
             onFilesChange={(nextFiles) => {
               setFiles(nextFiles);
+              setError(null);
+              setRecoveryAction(null);
               if (nextFiles.length > 0) {
                 setUseSample(false);
               }
@@ -285,8 +419,12 @@ export function MedicalReportApp() {
               setFiles([]);
               setUseSample(true);
               setError(null);
+              setRecoveryAction(null);
             }}
+            processingProgress={processingProgress}
             processingStage={processingStage}
+            recoveryAction={recoveryAction}
+            uploadsSaved={uploadsSaved}
             useSample={useSample}
           />
         ) : null}

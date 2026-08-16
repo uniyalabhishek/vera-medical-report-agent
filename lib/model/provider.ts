@@ -10,16 +10,29 @@ export type ExtractionInput = {
   caseId: string;
   intake: Omit<Intake, "preferredName">;
   mode: "demo" | "uploaded";
-  documents: ProviderDocument[];
+  extractionScope?: "whole-case" | "ocr-page-group";
+  documents: ProviderDocumentInfo[];
+  ocrPages?: ProviderOcrPage[];
 };
 
-export type ProviderDocument = {
+export type ProviderDocumentInfo = {
   id: string;
   name: string;
   mimeType: string;
   sizeBytes: number;
-  data: Uint8Array;
   category: DocumentCategory;
+};
+
+export type ProviderDocument = ProviderDocumentInfo & {
+  data: Uint8Array;
+};
+
+export type ProviderOcrPage = {
+  documentId: string;
+  documentName: string;
+  page: number;
+  text: string;
+  documentCategory: DocumentCategory;
 };
 
 export type SynthesisInput = {
@@ -51,9 +64,33 @@ export class ProviderConfigurationError extends Error {
 
 export class ProviderProcessingError extends Error {
   readonly code = "PROVIDER_PROCESSING_FAILED";
+  readonly reasonCode: ProviderProcessingReasonCode;
+  readonly retryable: boolean;
 
-  constructor(message: string) {
+  constructor(
+    message: string,
+    options: {
+      reasonCode?: ProviderProcessingReasonCode;
+      retryable?: boolean;
+    } = {},
+  ) {
     super(message);
     this.name = "ProviderProcessingError";
+    this.reasonCode = options.reasonCode ?? "UNCLASSIFIED";
+    this.retryable = options.retryable ?? false;
   }
 }
+
+export type ProviderProcessingReasonCode =
+  | "UNCLASSIFIED"
+  | "PROVIDER_TRANSIENT_FAILURE"
+  | "PROVIDER_CONFIGURATION_REJECTED"
+  | "PROVIDER_REQUEST_REJECTED"
+  | "EXTRACTION_MAX_OUTPUT_TOKENS"
+  | "EXTRACTION_CONTENT_FILTERED"
+  | "EXTRACTION_RESPONSE_NOT_COMPLETED"
+  | "EXTRACTION_REFUSED"
+  | "EXTRACTION_MISSING_STRUCTURED_TEXT"
+  | "EXTRACTION_MISSING_PARSED_OUTPUT"
+  | "EXTRACTION_NO_FACTS"
+  | "EXTRACTION_ALL_CANDIDATES_REJECTED";

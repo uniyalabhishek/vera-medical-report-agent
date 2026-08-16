@@ -2,6 +2,7 @@ import { upload as uploadBlob } from "@vercel/blob/client";
 import type {
   CaseView,
   DocumentCategory,
+  ExtractionProgress,
   Intake,
   QuestionResponse,
 } from "@/lib/contracts";
@@ -147,51 +148,110 @@ class MedicalReportApi {
     return body.case;
   }
 
-  async uploadFiles(caseId: string, files: Array<{ file: File; category: DocumentCategory }>) {
+  async uploadFiles(
+    caseId: string,
+    files: Array<{ id: string; file: File; category: DocumentCategory }>,
+  ) {
     if (!this.csrfToken) await this.initialize();
-    if (this.storageMode === "cloud") {
-      const completed: UploadResponse["uploads"] = [];
-      for (const [index, selected] of files.entries()) {
-        const { file, category } = selected;
-        const extension = file.type === "application/pdf"
-          ? "pdf"
-          : file.type === "image/png" ? "png" : "jpg";
-        const pathname = `cases/${caseId}/${crypto.randomUUID()}.${extension}`;
-        const blob = await uploadBlob(pathname, file, {
-          access: "private",
-          handleUploadUrl: `/api/cases/${caseId}/uploads/token`,
-          headers: { "x-csrf-token": this.csrfToken },
-          contentType: file.type,
-        });
-        const finalized = await this.mutation<UploadResponse>(`/api/cases/${caseId}/uploads`, {
-          method: "POST",
-          body: JSON.stringify({
-            pathname: blob.pathname,
-            displayName: file.name,
-            category,
-            complete: index === files.length - 1,
-          }),
-        });
-        completed.push(...finalized.uploads);
+    try {
+      if (this.storageMode === "cloud") {
+        const completed: UploadResponse["uploads"] = [];
+        for (const [index, selected] of files.entries()) {
+          const { file, category } = selected;
+          const extension = file.type === "application/pdf"
+            ? "pdf"
+            : file.type === "image/png" ? "png" : "jpg";
+          const pathname = `cases/${caseId}/${selected.id}.${extension}`;
+          const finalize = () => this.mutation<UploadResponse>(`/api/cases/${caseId}/uploads`, {
+            method: "POST",
+            body: JSON.stringify({
+              pathname,
+              displayName: file.name,
+              category,
+              complete: index === files.length - 1,
+            }),
+          });
+          let finalized: UploadResponse;
+          try {
+            await uploadBlob(pathname, file, {
+              access: "private",
+              handleUploadUrl: `/api/cases/${caseId}/uploads/token`,
+              headers: { "x-csrf-token": this.csrfToken },
+              contentType: file.type,
+              multipart: file.size >= 5 * 1024 * 1024,
+            });
+            finalized = await finalize();
+          } catch (uploadError) {
+            // A dropped success response can leave the private blob safely stored.
+            // Finalizing the same stable path makes a user retry recover that upload.
+            try {
+              finalized = await finalize();
+            } catch {
+              throw uploadError;
+            }
+          }
+          completed.push(...finalized.uploads);
+        }
+        return { uploads: completed };
       }
-      return { uploads: completed };
-    }
 
-    const form = new FormData();
-    files.forEach(({ file }) => form.append("files", file));
-    form.append("categories", JSON.stringify(files.map(({ category }) => category)));
-    return this.mutation<UploadResponse>(`/api/cases/${caseId}/uploads`, {
-      method: "POST",
-      body: form,
-    });
+      const form = new FormData();
+      files.forEach(({ file }) => form.append("files", file));
+      form.append("categories", JSON.stringify(files.map(({ category }) => category)));
+      return await this.mutation<UploadResponse>(`/api/cases/${caseId}/uploads`, {
+        method: "POST",
+        body: form,
+      });
+    } catch (uploadError) {
+      // The server may have committed the final file even when its response was
+      // lost. Confirm the case state before asking the user to upload again.
+      const saved = await this.getCase(caseId).catch(() => null);
+      if (saved && saved.state !== "DRAFT") return { uploads: [] };
+      throw uploadError;
+    }
   }
 
-  async extract(caseId: string, mode: "demo" | "uploaded") {
-    const body = await this.mutation<{ case: CaseView }>(`/api/cases/${caseId}/extract`, {
-      method: "POST",
-      body: JSON.stringify({ mode }),
-    });
-    return body.case;
+  async extract(
+    caseId: string,
+    mode: "demo" | "uploaded",
+    onProgress?: (progress: ExtractionProgress) => void,
+  ) {
+    const deadline = Date.now() + 15 * 60 * 1_000;
+    for (;;) {
+      const response = await this.authenticatedFetch(`/api/cases/${caseId}/extract`, {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      });
+      const body = (await response.json().catch(() => null)) as
+        | {
+            case?: CaseView;
+            progress?: ExtractionProgress;
+            retryAfterMs?: number;
+            error?: { code?: string; message?: string };
+          }
+        | null;
+      if (!response.ok) {
+        throw new ClientApiError(
+          body?.error?.code ?? "REQUEST_FAILED",
+          body?.error?.message ?? "The reports could not be read.",
+          response.status,
+        );
+      }
+      if (!body?.case) {
+        throw new ClientApiError("INVALID_RESPONSE", "The report reader returned no case.", 502);
+      }
+      if (body.progress) onProgress?.(body.progress);
+      if (response.status !== 202) return body.case;
+      if (Date.now() >= deadline) {
+        throw new ClientApiError(
+          "EXTRACTION_WAIT_TIMEOUT",
+          "Report reading is still in progress. Retry to continue from the saved pages.",
+          504,
+        );
+      }
+      const retryAfterMs = Math.min(30_000, Math.max(250, body.retryAfterMs ?? 6_500));
+      await new Promise((resolve) => window.setTimeout(resolve, retryAfterMs));
+    }
   }
 
   async confirm(caseId: string) {

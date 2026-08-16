@@ -4,6 +4,21 @@ import { randomUUID } from "node:crypto";
 import type { Analysis, CaseState, CaseView, DocumentCategory, Fact, Intake, QuestionResponse } from "@/lib/contracts";
 import { DocumentCategorySchema, IntakeSchema } from "@/lib/contracts";
 import { ApiError } from "@/lib/server/api-error";
+import {
+  hasExactExtractionPlan,
+  hasSameExtractionGeometry,
+  serializeModelFacts,
+  serializeOcrPages,
+  toExtractionWorkRecord,
+} from "@/lib/server/extraction-work";
+import type {
+  ExtractionWorkKey,
+  ExtractionWorkRecord,
+  ExtractionWorkRow,
+  ExtractionWorkUpdate,
+  ModelWorkUpdate,
+  NewExtractionWork,
+} from "@/lib/server/extraction-work";
 import { ensureCloudSchema, getCloudSql } from "@/lib/server/neon";
 
 const CASE_RETENTION_MS = 24 * 60 * 60 * 1_000;
@@ -232,6 +247,282 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
     sourceMode: row.source_mode,
     category: DocumentCategorySchema.parse(row.category),
   }));
+}
+
+async function getExtractionWorkRecord(
+  caseId: string,
+  uploadId: string,
+  chunkIndex: number,
+): Promise<ExtractionWorkRecord | null> {
+  const rows = await getCloudSql().query(
+    `SELECT case_id, upload_id, chunk_index, page_offset, page_count, status,
+            provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+            model_status, model_facts_json, model_attempts, model_error_code,
+            model_lease_expires_at,
+            created_at, updated_at
+     FROM extraction_work
+     WHERE case_id = $1 AND upload_id = $2 AND chunk_index = $3`,
+    [caseId, uploadId, chunkIndex],
+  ) as ExtractionWorkRow[];
+  return rows[0] ? toExtractionWorkRecord(rows[0]) : null;
+}
+
+export async function upsertExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  input: NewExtractionWork,
+) {
+  await getOwnedCase(caseId, sessionHash);
+  const now = Date.now();
+  const rows = await getCloudSql().query(
+    `INSERT INTO extraction_work
+       (case_id, upload_id, chunk_index, page_offset, page_count, status,
+        provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+        created_at, updated_at)
+     SELECT u.case_id, u.id, $1, $2, $3, 'pending', NULL, NULL, 0, NULL, $4, $4
+     FROM uploads u
+     WHERE u.id = $5 AND u.case_id = $6
+     ON CONFLICT (case_id, upload_id, chunk_index) DO NOTHING
+     RETURNING case_id, upload_id, chunk_index, page_offset, page_count, status,
+               provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+               model_status, model_facts_json, model_attempts, model_error_code,
+               model_lease_expires_at,
+               created_at, updated_at`,
+    [input.chunkIndex, input.pageOffset, input.pageCount, now, input.uploadId, caseId],
+  ) as ExtractionWorkRow[];
+
+  const record = rows[0]
+    ? toExtractionWorkRecord(rows[0])
+    : await getExtractionWorkRecord(caseId, input.uploadId, input.chunkIndex);
+  if (!record) {
+    throw new ApiError(404, "UPLOAD_NOT_FOUND", "The upload for this extraction work was not found.");
+  }
+  if (!hasSameExtractionGeometry(record, input)) {
+    throw new ApiError(
+      409,
+      "EXTRACTION_WORK_CONFLICT",
+      "This extraction chunk conflicts with the saved extraction work.",
+    );
+  }
+  return record;
+}
+
+export async function initializeExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  inputs: NewExtractionWork[],
+): Promise<ExtractionWorkRecord[]> {
+  await getOwnedCase(caseId, sessionHash);
+  if (inputs.length === 0) {
+    throw new ApiError(409, "EXTRACTION_PLAN_EMPTY", "No document pages were prepared.");
+  }
+
+  const sql = getCloudSql();
+  const now = Date.now();
+  await sql.query(
+    `WITH requested AS (
+       SELECT upload_id, chunk_index, page_offset, page_count
+       FROM jsonb_to_recordset($1::jsonb) AS plan(
+         upload_id TEXT,
+         chunk_index INTEGER,
+         page_offset INTEGER,
+         page_count INTEGER
+       )
+     ),
+     plan_is_valid AS (
+       SELECT
+         (SELECT COUNT(*) FROM requested) > 0
+         AND (SELECT COUNT(*) FROM requested) = (
+           SELECT COUNT(*) FROM (
+             SELECT upload_id, chunk_index FROM requested GROUP BY upload_id, chunk_index
+           ) unique_keys
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM requested r
+           LEFT JOIN uploads u ON u.id = r.upload_id AND u.case_id = $2
+           WHERE u.id IS NULL
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM extraction_work ew
+           WHERE ew.case_id = $2
+             AND NOT EXISTS (
+               SELECT 1 FROM requested r
+               WHERE r.upload_id = ew.upload_id AND r.chunk_index = ew.chunk_index
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM extraction_work ew
+           JOIN requested r
+             ON r.upload_id = ew.upload_id AND r.chunk_index = ew.chunk_index
+           WHERE ew.case_id = $2
+             AND (ew.page_offset != r.page_offset OR ew.page_count != r.page_count)
+         ) AS accepted
+     )
+     INSERT INTO extraction_work
+       (case_id, upload_id, chunk_index, page_offset, page_count, status,
+        provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+        created_at, updated_at)
+     SELECT u.case_id, u.id, r.chunk_index, r.page_offset, r.page_count,
+            'pending', NULL, NULL, 0, NULL, $3, $3
+     FROM requested r
+     JOIN uploads u ON u.id = r.upload_id AND u.case_id = $2
+     CROSS JOIN plan_is_valid check_result
+     WHERE check_result.accepted
+     ON CONFLICT (case_id, upload_id, chunk_index) DO NOTHING`,
+    [JSON.stringify(inputs.map((input) => ({
+      upload_id: input.uploadId,
+      chunk_index: input.chunkIndex,
+      page_offset: input.pageOffset,
+      page_count: input.pageCount,
+    }))), caseId, now],
+  );
+  const records = await listExtractionWork(caseId, sessionHash);
+  if (!hasExactExtractionPlan(records, inputs)) {
+    throw new ApiError(
+      409,
+      "EXTRACTION_WORK_CONFLICT",
+      "The saved page plan does not match this report.",
+    );
+  }
+  return records;
+}
+
+export async function listExtractionWork(
+  caseId: string,
+  sessionHash: string,
+): Promise<ExtractionWorkRecord[]> {
+  await getOwnedCase(caseId, sessionHash);
+  const rows = await getCloudSql().query(
+    `SELECT ew.case_id, ew.upload_id, ew.chunk_index, ew.page_offset,
+            ew.page_count, ew.status, ew.provider_job_id, ew.ocr_pages_json,
+            ew.attempts, ew.lease_expires_at, ew.model_status,
+            ew.model_facts_json, ew.model_attempts, ew.model_error_code,
+            ew.model_lease_expires_at, ew.created_at, ew.updated_at
+     FROM extraction_work ew
+     JOIN uploads u ON u.id = ew.upload_id AND u.case_id = ew.case_id
+     WHERE ew.case_id = $1
+     ORDER BY u.created_at ASC, u.id ASC, ew.chunk_index ASC`,
+    [caseId],
+  ) as ExtractionWorkRow[];
+  return rows.map(toExtractionWorkRecord);
+}
+
+export async function updateExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  update: ExtractionWorkUpdate,
+): Promise<ExtractionWorkRecord | null> {
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), update.expectedUpdatedAt + 1);
+  const rows = await getCloudSql().query(
+    `UPDATE extraction_work
+     SET status = $1, provider_job_id = $2, ocr_pages_json = $3, attempts = $4,
+         lease_expires_at = $5, updated_at = $6
+     WHERE case_id = $7 AND upload_id = $8 AND chunk_index = $9 AND updated_at = $10
+     RETURNING case_id, upload_id, chunk_index, page_offset, page_count, status,
+               provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+               model_status, model_facts_json, model_attempts, model_error_code,
+               model_lease_expires_at,
+               created_at, updated_at`,
+    [
+      update.status,
+      update.providerJobId,
+      serializeOcrPages(update.ocrPages),
+      update.attempts,
+      update.leaseExpiresAt,
+      updatedAt,
+      caseId,
+      key.uploadId,
+      key.chunkIndex,
+      update.expectedUpdatedAt,
+    ],
+  ) as ExtractionWorkRow[];
+  return rows[0] ? toExtractionWorkRecord(rows[0]) : null;
+}
+
+export async function updateModelWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  update: ModelWorkUpdate,
+): Promise<ExtractionWorkRecord | null> {
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), update.expectedUpdatedAt + 1);
+  const rows = await getCloudSql().query(
+    `UPDATE extraction_work
+     SET model_status = $1, model_facts_json = $2, model_attempts = $3,
+         model_error_code = $4, model_lease_expires_at = $5, updated_at = $6
+     WHERE case_id = $7 AND upload_id = $8 AND chunk_index = $9
+       AND status = 'completed' AND updated_at = $10
+     RETURNING case_id, upload_id, chunk_index, page_offset, page_count, status,
+               provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+               model_status, model_facts_json, model_attempts, model_error_code,
+               model_lease_expires_at, created_at, updated_at`,
+    [
+      update.modelStatus,
+      serializeModelFacts(update.modelFacts),
+      update.modelAttempts,
+      update.modelErrorCode,
+      update.modelLeaseExpiresAt,
+      updatedAt,
+      caseId,
+      key.uploadId,
+      key.chunkIndex,
+      update.expectedUpdatedAt,
+    ],
+  ) as ExtractionWorkRow[];
+  return rows[0] ? toExtractionWorkRecord(rows[0]) : null;
+}
+
+export async function resetFailedExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  expectedUpdatedAt: number,
+): Promise<ExtractionWorkRecord | null> {
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), expectedUpdatedAt + 1);
+  const rows = await getCloudSql().query(
+    `UPDATE extraction_work
+     SET status = 'pending', provider_job_id = NULL, ocr_pages_json = NULL,
+         lease_expires_at = NULL, updated_at = $1
+     WHERE case_id = $2 AND upload_id = $3 AND chunk_index = $4
+       AND status = 'failed' AND updated_at = $5
+     RETURNING case_id, upload_id, chunk_index, page_offset, page_count, status,
+               provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+               model_status, model_facts_json, model_attempts, model_error_code,
+               model_lease_expires_at,
+               created_at, updated_at`,
+    [updatedAt, caseId, key.uploadId, key.chunkIndex, expectedUpdatedAt],
+  ) as ExtractionWorkRow[];
+  return rows[0] ? toExtractionWorkRecord(rows[0]) : null;
+}
+
+export async function resetFailedModelWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  expectedUpdatedAt: number,
+): Promise<ExtractionWorkRecord | null> {
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), expectedUpdatedAt + 1);
+  const rows = await getCloudSql().query(
+    `UPDATE extraction_work
+     SET model_status = 'pending', model_facts_json = NULL, model_attempts = 0,
+         model_error_code = NULL, model_lease_expires_at = NULL, updated_at = $1
+     WHERE case_id = $2 AND upload_id = $3 AND chunk_index = $4
+       AND status = 'completed' AND model_status = 'failed' AND updated_at = $5
+     RETURNING case_id, upload_id, chunk_index, page_offset, page_count, status,
+               provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+               model_status, model_facts_json, model_attempts, model_error_code,
+               model_lease_expires_at, created_at, updated_at`,
+    [updatedAt, caseId, key.uploadId, key.chunkIndex, expectedUpdatedAt],
+  ) as ExtractionWorkRow[];
+  return rows[0] ? toExtractionWorkRecord(rows[0]) : null;
 }
 
 export async function addConversationTurn(

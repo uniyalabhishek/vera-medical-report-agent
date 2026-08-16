@@ -14,7 +14,33 @@ import { DocumentCategorySchema, IntakeSchema } from "@/lib/contracts";
 import { db } from "@/lib/server/db";
 import { ApiError } from "@/lib/server/api-error";
 import * as cloud from "@/lib/server/cloud-case-repository";
+import {
+  hasExactExtractionPlan,
+  hasSameExtractionGeometry,
+  serializeModelFacts,
+  serializeOcrPages,
+  toExtractionWorkRecord,
+} from "@/lib/server/extraction-work";
+import type {
+  ExtractionWorkKey,
+  ExtractionWorkRecord,
+  ExtractionWorkRow,
+  ExtractionWorkUpdate,
+  ModelWorkUpdate,
+  NewExtractionWork,
+} from "@/lib/server/extraction-work";
 import { getStorageMode } from "@/lib/server/storage-mode";
+
+export type {
+  ExtractionOcrPage,
+  ExtractionWorkKey,
+  ExtractionWorkRecord,
+  ExtractionWorkStatus,
+  ExtractionWorkUpdate,
+  ModelWorkStatus,
+  ModelWorkUpdate,
+  NewExtractionWork,
+} from "@/lib/server/extraction-work";
 
 const CASE_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
@@ -279,6 +305,269 @@ export async function listUploads(caseId: string, sessionHash: string): Promise<
     sourceMode: row.source_mode,
     category: DocumentCategorySchema.parse(row.category),
   }));
+}
+
+function getLocalExtractionWork(
+  caseId: string,
+  uploadId: string,
+  chunkIndex: number,
+): ExtractionWorkRecord | null {
+  const row = db.prepare(
+    `SELECT case_id, upload_id, chunk_index, page_offset, page_count, status,
+            provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+            model_status, model_facts_json, model_attempts, model_error_code,
+            model_lease_expires_at,
+            created_at, updated_at
+     FROM extraction_work
+     WHERE case_id = ? AND upload_id = ? AND chunk_index = ?`,
+  ).get(caseId, uploadId, chunkIndex) as ExtractionWorkRow | undefined;
+  return row ? toExtractionWorkRecord(row) : null;
+}
+
+export async function upsertExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  input: NewExtractionWork,
+) {
+  if (getStorageMode() === "cloud") {
+    return cloud.upsertExtractionWork(caseId, sessionHash, input);
+  }
+  await getOwnedCase(caseId, sessionHash);
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO extraction_work
+       (case_id, upload_id, chunk_index, page_offset, page_count, status,
+        provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+        created_at, updated_at)
+     SELECT u.case_id, u.id, ?, ?, ?, 'pending', NULL, NULL, 0, NULL, ?, ?
+     FROM uploads u
+     WHERE u.id = ? AND u.case_id = ?
+     ON CONFLICT (case_id, upload_id, chunk_index) DO NOTHING`,
+  ).run(
+    input.chunkIndex,
+    input.pageOffset,
+    input.pageCount,
+    now,
+    now,
+    input.uploadId,
+    caseId,
+  );
+
+  const record = getLocalExtractionWork(caseId, input.uploadId, input.chunkIndex);
+  if (!record) {
+    throw new ApiError(404, "UPLOAD_NOT_FOUND", "The upload for this extraction work was not found.");
+  }
+  if (!hasSameExtractionGeometry(record, input)) {
+    throw new ApiError(
+      409,
+      "EXTRACTION_WORK_CONFLICT",
+      "This extraction chunk conflicts with the saved extraction work.",
+    );
+  }
+  return record;
+}
+
+export async function initializeExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  inputs: NewExtractionWork[],
+): Promise<ExtractionWorkRecord[]> {
+  if (getStorageMode() === "cloud") {
+    return cloud.initializeExtractionWork(caseId, sessionHash, inputs);
+  }
+  await getOwnedCase(caseId, sessionHash);
+  if (inputs.length === 0) {
+    throw new ApiError(409, "EXTRACTION_PLAN_EMPTY", "No document pages were prepared.");
+  }
+
+  const now = Date.now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const insert = db.prepare(
+      `INSERT INTO extraction_work
+         (case_id, upload_id, chunk_index, page_offset, page_count, status,
+          provider_job_id, ocr_pages_json, attempts, lease_expires_at,
+          created_at, updated_at)
+       SELECT u.case_id, u.id, ?, ?, ?, 'pending', NULL, NULL, 0, NULL, ?, ?
+       FROM uploads u
+       WHERE u.id = ? AND u.case_id = ?
+       ON CONFLICT (case_id, upload_id, chunk_index) DO NOTHING`,
+    );
+    for (const input of inputs) {
+      insert.run(
+        input.chunkIndex,
+        input.pageOffset,
+        input.pageCount,
+        now,
+        now,
+        input.uploadId,
+        caseId,
+      );
+    }
+    const rows = db.prepare(
+      `SELECT ew.case_id, ew.upload_id, ew.chunk_index, ew.page_offset,
+              ew.page_count, ew.status, ew.provider_job_id, ew.ocr_pages_json,
+              ew.attempts, ew.lease_expires_at, ew.model_status,
+              ew.model_facts_json, ew.model_attempts, ew.model_error_code,
+              ew.model_lease_expires_at, ew.created_at, ew.updated_at
+       FROM extraction_work ew
+       JOIN uploads u ON u.id = ew.upload_id AND u.case_id = ew.case_id
+       WHERE ew.case_id = ?
+       ORDER BY u.created_at ASC, u.id ASC, ew.chunk_index ASC`,
+    ).all(caseId) as ExtractionWorkRow[];
+    const records = rows.map(toExtractionWorkRecord);
+    if (!hasExactExtractionPlan(records, inputs)) {
+      throw new ApiError(
+        409,
+        "EXTRACTION_WORK_CONFLICT",
+        "The saved page plan does not match this report.",
+      );
+    }
+    db.exec("COMMIT");
+    return records;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export async function listExtractionWork(
+  caseId: string,
+  sessionHash: string,
+): Promise<ExtractionWorkRecord[]> {
+  if (getStorageMode() === "cloud") return cloud.listExtractionWork(caseId, sessionHash);
+  await getOwnedCase(caseId, sessionHash);
+  const rows = db.prepare(
+    `SELECT ew.case_id, ew.upload_id, ew.chunk_index, ew.page_offset,
+            ew.page_count, ew.status, ew.provider_job_id, ew.ocr_pages_json,
+            ew.attempts, ew.lease_expires_at, ew.model_status,
+            ew.model_facts_json, ew.model_attempts, ew.model_error_code,
+            ew.model_lease_expires_at, ew.created_at, ew.updated_at
+     FROM extraction_work ew
+     JOIN uploads u ON u.id = ew.upload_id AND u.case_id = ew.case_id
+     WHERE ew.case_id = ?
+     ORDER BY u.created_at ASC, u.id ASC, ew.chunk_index ASC`,
+  ).all(caseId) as ExtractionWorkRow[];
+  return rows.map(toExtractionWorkRecord);
+}
+
+export async function updateExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  update: ExtractionWorkUpdate,
+): Promise<ExtractionWorkRecord | null> {
+  if (getStorageMode() === "cloud") {
+    return cloud.updateExtractionWork(caseId, sessionHash, key, update);
+  }
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), update.expectedUpdatedAt + 1);
+  const result = db.prepare(
+    `UPDATE extraction_work
+     SET status = ?, provider_job_id = ?, ocr_pages_json = ?, attempts = ?,
+         lease_expires_at = ?, updated_at = ?
+     WHERE case_id = ? AND upload_id = ? AND chunk_index = ? AND updated_at = ?`,
+  ).run(
+    update.status,
+    update.providerJobId,
+    serializeOcrPages(update.ocrPages),
+    update.attempts,
+    update.leaseExpiresAt,
+    updatedAt,
+    caseId,
+    key.uploadId,
+    key.chunkIndex,
+    update.expectedUpdatedAt,
+  );
+  if (result.changes !== 1) return null;
+  return getLocalExtractionWork(caseId, key.uploadId, key.chunkIndex);
+}
+
+export async function updateModelWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  update: ModelWorkUpdate,
+): Promise<ExtractionWorkRecord | null> {
+  if (getStorageMode() === "cloud") {
+    return cloud.updateModelWork(caseId, sessionHash, key, update);
+  }
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), update.expectedUpdatedAt + 1);
+  const result = db.prepare(
+    `UPDATE extraction_work
+     SET model_status = ?, model_facts_json = ?, model_attempts = ?,
+         model_error_code = ?, model_lease_expires_at = ?, updated_at = ?
+     WHERE case_id = ? AND upload_id = ? AND chunk_index = ?
+       AND status = 'completed' AND updated_at = ?`,
+  ).run(
+    update.modelStatus,
+    serializeModelFacts(update.modelFacts),
+    update.modelAttempts,
+    update.modelErrorCode,
+    update.modelLeaseExpiresAt,
+    updatedAt,
+    caseId,
+    key.uploadId,
+    key.chunkIndex,
+    update.expectedUpdatedAt,
+  );
+  if (result.changes !== 1) return null;
+  return getLocalExtractionWork(caseId, key.uploadId, key.chunkIndex);
+}
+
+export async function resetFailedExtractionWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  expectedUpdatedAt: number,
+): Promise<ExtractionWorkRecord | null> {
+  if (getStorageMode() === "cloud") {
+    return cloud.resetFailedExtractionWork(
+      caseId,
+      sessionHash,
+      key,
+      expectedUpdatedAt,
+    );
+  }
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), expectedUpdatedAt + 1);
+  const result = db.prepare(
+    `UPDATE extraction_work
+     SET status = 'pending', provider_job_id = NULL, ocr_pages_json = NULL,
+         lease_expires_at = NULL, updated_at = ?
+     WHERE case_id = ? AND upload_id = ? AND chunk_index = ?
+       AND status = 'failed' AND updated_at = ?`,
+  ).run(updatedAt, caseId, key.uploadId, key.chunkIndex, expectedUpdatedAt);
+  if (result.changes !== 1) return null;
+  return getLocalExtractionWork(caseId, key.uploadId, key.chunkIndex);
+}
+
+export async function resetFailedModelWork(
+  caseId: string,
+  sessionHash: string,
+  key: ExtractionWorkKey,
+  expectedUpdatedAt: number,
+): Promise<ExtractionWorkRecord | null> {
+  if (getStorageMode() === "cloud") {
+    return cloud.resetFailedModelWork(
+      caseId,
+      sessionHash,
+      key,
+      expectedUpdatedAt,
+    );
+  }
+  await getOwnedCase(caseId, sessionHash);
+  const updatedAt = Math.max(Date.now(), expectedUpdatedAt + 1);
+  const result = db.prepare(
+    `UPDATE extraction_work
+     SET model_status = 'pending', model_facts_json = NULL, model_attempts = 0,
+         model_error_code = NULL, model_lease_expires_at = NULL, updated_at = ?
+     WHERE case_id = ? AND upload_id = ? AND chunk_index = ?
+       AND status = 'completed' AND model_status = 'failed' AND updated_at = ?`,
+  ).run(updatedAt, caseId, key.uploadId, key.chunkIndex, expectedUpdatedAt);
+  if (result.changes !== 1) return null;
+  return getLocalExtractionWork(caseId, key.uploadId, key.chunkIndex);
 }
 
 export async function addConversationTurn(
